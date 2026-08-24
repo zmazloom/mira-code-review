@@ -382,6 +382,8 @@ class ReviewEngine:
         provider: BaseProvider | None = None,
         bot_name: str = "miracodeai",
         dry_run: bool = False,
+        post_inline_comments: bool = True,
+        resolve_threads: bool = True,
         indexing_llm: LLMProviderProtocol | None = None,
         security_llm: LLMProviderProtocol | None = None,
     ) -> None:
@@ -392,6 +394,8 @@ class ReviewEngine:
         self.provider = provider
         self.bot_name = bot_name
         self.dry_run = dry_run
+        self.post_inline_comments = post_inline_comments
+        self.resolve_threads = resolve_threads
         # `_jit_needed` (per-PR: index has no summaries for *this PR's* files)
         # is not the same as `_index_was_empty` (whole-repo: no data at all).
         # Only the latter drives the user-visible "your repo isn't indexed" nudge.
@@ -532,7 +536,11 @@ class ReviewEngine:
             try:
                 assert self.provider is not None
                 return await resolve_verified_threads(
-                    self.provider, self.llm, pr_info, self.bot_name, self.dry_run
+                    self.provider,
+                    self.llm,
+                    pr_info,
+                    self.bot_name,
+                    self.dry_run or not self.resolve_threads,
                 )
             except Exception as exc:
                 logger.warning("Thread resolution failed, continuing: %s", exc)
@@ -850,7 +858,7 @@ class ReviewEngine:
             # No walkthrough (all files excluded, empty diff, or generation
             # failed) — finalize the placeholder so it doesn't sit on
             # "Reviewing this PR…" forever.
-            reason = result.skipped_reason or "Walkthrough was not generated."
+            reason = result.skipped_reason or result.summary or "Walkthrough was not generated."
             markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
             try:
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)
@@ -865,7 +873,7 @@ class ReviewEngine:
         )
 
         posted_comment_ids: list[int] = []
-        if result.comments:
+        if result.comments and self.post_inline_comments:
             if self.dry_run:
                 logger.info(
                     "Dry run: would post %d comment(s) on PR %s",
@@ -876,8 +884,14 @@ class ReviewEngine:
                 posted_comment_ids = (
                     await self.provider.post_review(pr_info, result, bot_name=self.bot_name) or []
                 )
-        else:
+        elif not result.comments:
             logger.info("No code suggestions for PR %s", pr_info.url)
+        else:
+            logger.info(
+                "Inline publishing disabled: suppressed %d comment(s) on PR %s",
+                len(result.comments),
+                pr_info.url,
+            )
 
         result.thread_decisions = thread_decisions
 

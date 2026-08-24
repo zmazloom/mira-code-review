@@ -162,6 +162,8 @@ class GitLabProvider(BaseProvider):
             repo=repo,
             head_sha=mr.get("sha") or "",
             platform="gitlab",
+            author=(mr.get("author") or {}).get("username", ""),
+            author_avatar_url=(mr.get("author") or {}).get("avatar_url", ""),
         )
 
     async def _changes(self, pr_info: PRInfo) -> dict[str, Any]:

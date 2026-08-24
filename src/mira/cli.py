@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from datetime import UTC
 
@@ -15,6 +16,12 @@ from mira.config import load_config
 from mira.core.engine import ReviewEngine
 from mira.exceptions import MiraError
 from mira.llm import create_llm
+from mira.manual_review import (
+    ManualReviewCommand,
+    ManualReviewOutcome,
+    create_manual_provider,
+    parse_pull_request_reference,
+)
 from mira.models import ReviewResult, Severity
 
 
@@ -116,6 +123,98 @@ def _format_json(result: ReviewResult) -> str:
     return json.dumps(data, indent=2)
 
 
+def _format_manual_text(outcome: ManualReviewOutcome) -> str:
+    """Format a manual PR/MR review with provider metadata for the terminal."""
+    info = outcome.pr_info
+    result = outcome.result
+    total_files = len(result.total_paths) if result.total_paths else result.reviewed_files
+    if result.skipped_reason:
+        status = f"Completed with note: {result.skipped_reason}"
+    elif outcome.posted:
+        status = "Completed and posted"
+        if not outcome.inline_posted:
+            status += " (summary only; inline findings suppressed)"
+    else:
+        status = "Completed (not posted)"
+
+    lines = [
+        f"Repository: {info.owner}/{info.repo}",
+        f"PR/MR number: {info.number}",
+        f"Title: {info.title}",
+        f"Author: {info.author or '(unknown)'}",
+        f"Base branch: {info.base_branch}",
+        f"Head branch: {info.head_branch}",
+        f"Files changed: {total_files}",
+        f"Review status: {status}",
+        "",
+        "Summary",
+        "-------",
+        result.summary or "No summary was generated.",
+        "",
+        "Findings:",
+    ]
+
+    if not result.comments:
+        lines.append("No findings. The review completed successfully.")
+    else:
+        for comment in result.comments:
+            location = f"{comment.path}:{comment.line}"
+            if comment.end_line and comment.end_line != comment.line:
+                location += f"-{comment.end_line}"
+            lines.extend(
+                [
+                    f"- Severity: {comment.severity.name.lower()}",
+                    f"  File: {location}",
+                    f"  Title: {comment.title}",
+                    f"  Rationale: {comment.body}",
+                ]
+            )
+            if comment.suggestion:
+                lines.append(f"  Suggestion: {comment.suggestion}")
+            lines.append(f"  Confidence: {comment.confidence:.2f}")
+
+    return "\n".join(lines)
+
+
+def _format_manual_json(outcome: ManualReviewOutcome) -> str:
+    """Add PR/MR metadata and posting state to the established JSON result."""
+    review_data = json.loads(_format_json(outcome.result))
+    info = outcome.pr_info
+    data = {
+        "repository": f"{info.owner}/{info.repo}",
+        "provider": outcome.reference.provider,
+        "number": info.number,
+        "title": info.title,
+        "author": info.author,
+        "base_branch": info.base_branch,
+        "head_branch": info.head_branch,
+        "files_changed": len(outcome.result.total_paths)
+        if outcome.result.total_paths
+        else outcome.result.reviewed_files,
+        "posted": outcome.posted,
+        "inline_posted": outcome.inline_posted,
+        **review_data,
+    }
+    return json.dumps(data, indent=2)
+
+
+def _redact_cli_secrets(message: str, *values: str | None) -> str:
+    """Keep provider/LLM credentials out of terminal error output."""
+    secrets = {
+        value
+        for value in (
+            *values,
+            os.environ.get("MIRA_GIT_TOKEN"),
+            os.environ.get("MIRA_GITLAB_TOKEN"),
+            os.environ.get("MIRA_FORGEJO_TOKEN"),
+        )
+        if value
+    }
+    for secret in secrets:
+        message = message.replace(secret, "***")
+    return message
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="mira")
 def main() -> None:
@@ -123,6 +222,7 @@ def main() -> None:
 
 
 @main.command()
+@click.argument("url", required=False)
 @click.option("--pr", "pr_url", default=None, help="PR/MR URL (GitHub PR or GitLab MR)")
 @click.option("--stdin", "use_stdin", is_flag=True, help="Read diff from stdin")
 @click.option("--model", envvar="MIRA_MODEL", default=None, help="LLM model to use")
@@ -135,7 +235,24 @@ def main() -> None:
     default=None,
     help="GitHub API token (alias for --token)",
 )
-@click.option("--dry-run", is_flag=True, help="Don't post review, just print results")
+@click.option(
+    "--gitlab-token",
+    envvar="GITLAB_TOKEN",
+    default=None,
+    help="GitLab API token (alias for --token)",
+)
+@click.option("--post", is_flag=True, help="Publish the summary and inline findings")
+@click.option("--dry-run", is_flag=True, help="Explicitly guarantee no remote writes")
+@click.option(
+    "--summary-only",
+    is_flag=True,
+    help="With --post, publish only the summary and suppress inline findings",
+)
+@click.option(
+    "--no-inline",
+    is_flag=True,
+    help="With --post, publish the summary and suppress inline findings",
+)
 @click.option("--output", "output_format", type=click.Choice(["text", "json"]), default="text")
 @click.option("--verbose", is_flag=True, help="Enable verbose logging")
 @click.option("--config", "config_path", default=None, help="Path to .mira.yaml")
@@ -146,6 +263,7 @@ def main() -> None:
     "inline review is needed and the extra LLM call should be saved.",
 )
 def review(
+    url: str | None,
     pr_url: str | None,
     use_stdin: bool,
     model: str | None,
@@ -153,21 +271,39 @@ def review(
     confidence: float | None,
     token: str | None,
     github_token: str | None,
+    gitlab_token: str | None,
+    post: bool,
     dry_run: bool,
+    summary_only: bool,
+    no_inline: bool,
     output_format: str,
     verbose: bool,
     config_path: str | None,
     no_walkthrough: bool,
 ) -> None:
-    """Review a pull request or diff."""
+    """Review a pull/merge request URL or a diff from stdin.
+
+    URL reviews are read-only by default. Pass --post to publish the result.
+    """
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(name)s %(levelname)s: %(message)s",
         stream=sys.stdout,
     )
 
-    if not pr_url and not use_stdin:
-        raise click.UsageError("Provide --pr <url> or --stdin")
+    if url and pr_url:
+        raise click.UsageError("Provide the PR/MR URL either positionally or with --pr, not both")
+    target_url = url or pr_url
+    if not target_url and not use_stdin:
+        raise click.UsageError("Provide <PR_OR_MR_URL>, --pr <url>, or --stdin")
+    if target_url and use_stdin:
+        raise click.UsageError("A PR/MR URL cannot be combined with --stdin")
+    if post and dry_run:
+        raise click.UsageError("--post and --dry-run are incompatible")
+    if (summary_only or no_inline) and not post:
+        raise click.UsageError("--summary-only and --no-inline require --post")
+    if use_stdin and post:
+        raise click.UsageError("--post requires a PR/MR URL")
 
     overrides: dict[str, object] = {}
     if model:
@@ -184,57 +320,50 @@ def review(
     except MiraError as e:
         raise click.ClickException(str(e)) from e
 
-    from mira.dashboard.models_config import llm_config_for
-
-    llm = create_llm(llm_config_for("review", config.llm))
-    indexing_llm = create_llm(llm_config_for("indexing", config.llm))
-    security_llm = create_llm(llm_config_for("security", config.llm))
-
-    git_token = token or github_token
-    github_provider = None
-    if pr_url:
-        if not git_token:
-            raise click.UsageError(
-                "--token (or --github-token / GITHUB_TOKEN / MIRA_GIT_TOKEN) is required for PR review"
-            )
-        # Infer the platform from the URL shape; fall back to the configured default.
-        if "/-/merge_requests/" in pr_url or "gitlab" in pr_url:
-            provider_type = "gitlab"
-        elif "/pulls/" in pr_url or "forgejo" in pr_url:
-            provider_type = "forgejo"
-        elif "/pull/" in pr_url or "github" in pr_url:
-            provider_type = "github"
-        else:
-            provider_type = config.provider.type
-        from mira.providers import create_provider, get_available_providers
-
-        try:
-            github_provider = create_provider(provider_type, git_token)
-        except ValueError as err:
-            available = ", ".join(get_available_providers()) or "(none)"
-            raise click.UsageError(
-                f"Unknown provider type {provider_type!r}. Available providers: {available}"
-            ) from err
-
-    engine = ReviewEngine(
-        config=config,
-        llm=llm,
-        provider=github_provider,
-        dry_run=dry_run,
-        indexing_llm=indexing_llm,
-        security_llm=security_llm,
-    )
-
     try:
         if use_stdin:
+            from mira.dashboard.models_config import llm_config_for
+
+            llm = create_llm(llm_config_for("review", config.llm))
+            indexing_llm = create_llm(llm_config_for("indexing", config.llm))
+            security_llm = create_llm(llm_config_for("security", config.llm))
+            engine = ReviewEngine(
+                config=config,
+                llm=llm,
+                dry_run=True,
+                indexing_llm=indexing_llm,
+                security_llm=security_llm,
+            )
             diff_text = sys.stdin.read()
             result = asyncio.run(engine.review_diff(diff_text))
         else:
-            result = asyncio.run(engine.review_pr(pr_url))  # type: ignore[arg-type]
+            assert target_url is not None
+            reference = parse_pull_request_reference(target_url)
+            provider = create_manual_provider(
+                reference,
+                token=token,
+                github_token=github_token,
+                gitlab_token=gitlab_token,
+            )
+            command = ManualReviewCommand(
+                config=config,
+                provider=provider,
+                post=post,
+                post_inline_comments=not (summary_only or no_inline),
+            )
+            outcome = asyncio.run(command.execute(reference))
+            result = outcome.result
     except MiraError as e:
-        raise click.ClickException(str(e)) from e
+        message = _redact_cli_secrets(e.safe_message, token, github_token, gitlab_token)
+        raise click.ClickException(message) from e
+    except Exception as e:
+        raise click.ClickException(f"Review failed: {type(e).__name__}") from e
 
-    if output_format == "json":
+    if not use_stdin and output_format == "json":
+        click.echo(_format_manual_json(outcome))
+    elif not use_stdin:
+        click.echo(_format_manual_text(outcome))
+    elif output_format == "json":
         click.echo(_format_json(result))
     else:
         click.echo(_format_text(result))

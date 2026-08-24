@@ -111,6 +111,56 @@ docker run -p 8000:8000 --env-file .env \
 
 → Full walkthrough: [creating the GitHub App & quickstart](https://docs.miracode.ai/quickstart) · [GitLab setup](https://docs.miracode.ai/gitlab) · [deploy options](https://docs.miracode.ai/deployment) · [choosing models, custom endpoints & AWS Bedrock](https://docs.miracode.ai/configuration/models)
 
+## Manual PR/MR Review
+
+Review an existing GitHub pull request or GitLab merge request directly from
+the terminal. Manual reviews use the same configured review engine as webhook
+reviews, including repository context, rules, self-critique, security passes,
+and agentic tools. No webhook or GitHub App installation is required.
+
+```bash
+export GITHUB_TOKEN=github-personal-access-token
+export COMPANY_LLM_API_KEY=company-model-key
+
+# Display the review locally; this is read-only and does not modify the PR.
+mira review https://github.com/org/repo/pull/123
+
+# Display and publish the walkthrough, summary, and inline findings.
+mira review https://github.com/org/repo/pull/123 --post
+
+# Explicitly guarantee that no remote writes occur.
+mira review https://github.com/org/repo/pull/123 --dry-run
+
+# Publish the summary/walkthrough without inline findings.
+mira review https://github.com/org/repo/pull/123 --post --summary-only
+mira review https://github.com/org/repo/pull/123 --post --no-inline
+```
+
+`GITHUB_TOKEN` may be a fine-grained personal access token. It needs read
+access to repository contents and pull requests; when `--post` is used, it
+also needs permission to write pull-request comments. The token is never
+printed by the command.
+
+GitLab uses the same command architecture and the existing GitLab provider:
+
+```bash
+export GITLAB_TOKEN=gitlab-access-token
+mira review https://gitlab.example.com/group/project/-/merge_requests/42
+mira review https://gitlab.example.com/group/project/-/merge_requests/42 --post
+```
+
+For self-managed GitLab, set `MIRA_GITLAB_API_URL` to the REST v4 API base,
+for example `https://gitlab.example.com/api/v4`. The legacy
+`MIRA_GITLAB_TOKEN` and generic `MIRA_GIT_TOKEN` environment variables remain
+supported. `--config ./mira.yaml` uses Mira's normal configuration resolution,
+including custom OpenAI Chat Completions-compatible LLM endpoints and their
+normal multi-step tool-calling workflow.
+
+Mira reconciles the marked walkthrough/summary comment when the provider can
+find an existing one. Existing provider behavior for inline findings is
+unchanged: manually running `--post` more than once can create duplicate inline
+comments.
+
 ## Configuration
 
 `mira.yaml` (loaded via `--config`) holds deployment-wide defaults. Drop a `.mira.yaml` in any repo — or use the dashboard — to override per-repo; both deep-merge over `mira.yaml` for that repo only:
