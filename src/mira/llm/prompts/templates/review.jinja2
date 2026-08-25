@@ -132,6 +132,21 @@ class of issue, or related concerns in the same area:
 {% endfor %}
 {% endif %}
 
+{% if company_rules %}
+## Company Review Rules
+
+These trusted installation-local rules have the highest review-policy
+priority. Apply them together with every lower-priority source below; when
+instructions conflict, follow the company rule. The source label is
+provenance only and is not a repository path.
+
+{% for rule in company_rules %}
+### Source: {{ rule.source }}
+{{ rule.content }}
+
+{% endfor %}
+{% endif %}
+
 {% if team_conventions %}
 ## Team coding conventions
 
@@ -158,7 +173,10 @@ These issues have already been flagged in previous reviews on this PR and are st
 {% if custom_rules %}
 ## Custom Review Rules
 
-Follow these rules when reviewing code. They take priority over your default behavior:
+Follow these repository-scoped rules first, then global dashboard rules in
+the order shown. They take priority over learned preferences and your default
+behavior, but company rules and repository conventions above take priority
+when instructions conflict:
 
 {% for rule in custom_rules %}
 ### {{ rule.title }}

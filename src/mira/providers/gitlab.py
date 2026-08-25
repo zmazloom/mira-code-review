@@ -17,6 +17,7 @@ from urllib.parse import quote
 import httpx
 
 from mira.exceptions import ProviderError
+from mira.localization import is_persian
 from mira.models import (
     BotThreadRecord,
     FileHistoryEntry,
@@ -280,7 +281,11 @@ class GitLabProvider(BaseProvider):
 
         posted = 0
         for comment in result.comments:
-            body = format_comment_body(comment, bot_name=bot_name)
+            body = format_comment_body(
+                comment,
+                bot_name=bot_name,
+                output_language=result.output_language,
+            )
             line = (
                 comment.end_line
                 if comment.end_line and comment.end_line > comment.line
@@ -317,9 +322,14 @@ class GitLabProvider(BaseProvider):
 
         review_body = ""
         if result.summary:
-            review_body = f"**Mira Review Summary**\n\n{result.summary}"
+            summary_label = (
+                "خلاصه مرور Mira"
+                if is_persian(result.output_language)
+                else "Mira Review Summary"
+            )
+            review_body = f"**{summary_label}**\n\n{result.summary}"
         if result.key_issues:
-            review_body += format_key_issues(result.key_issues)
+            review_body += format_key_issues(result.key_issues, result.output_language)
         if review_body:
             try:
                 await self.post_comment(pr_info, review_body)

@@ -1,0 +1,3 @@
+review:
+  output_language: "fa"
+  rules_file: "persian_company_rules.md"

@@ -1,23 +1,8 @@
 llm:
-  base_url: "https://aifa-chatbot.sandpod.ir/v1/chat/completions"
+  base_url: "https://aifa-chatbot.sandpod.ir/v1"
   api_key_env: "COMPANY_LLM_API_KEY"
-
   model: "assistance-model"
-  indexing_model: "assistance-model"
-  review_model: "assistance-model"
-
-  temperature: 0.2
-  max_tokens: 4096
-
-filter:
-  confidence_threshold: 0.7
-  max_comments: 10
-  min_severity: "nitpick"
 
 review:
-  include_summary: true
-  walkthrough: true
-  code_context: true
-  self_critique: true
-  security_pass: true
-  agentic_tools: true
+  rules_file: "./company-rules.md"
+  output_language: "fa"

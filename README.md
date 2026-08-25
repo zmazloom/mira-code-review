@@ -174,6 +174,68 @@ filter:
 
 → Full schema and every key: [Configuration docs](https://docs.miracode.ai/configuration).
 
+### Review output language
+
+Set `review.output_language` to make the review model generate user-facing
+prose directly in the requested language. No translation model or second LLM
+call is used. Omitting the setting preserves Mira's existing English behavior.
+
+```yaml
+llm:
+  base_url: "https://company-llm.example.com/v1"
+  api_key_env: "COMPANY_LLM_API_KEY"
+  model: "assistance-model"
+
+review:
+  output_language: "fa"
+  rules_file: "./company-rules.md"
+```
+
+`en` and `fa` are supported explicitly; other BCP-47-style language codes are
+passed through as a shared model instruction. Persian output uses Mira's
+existing Markdown structure and localized fixed labels. Source-code
+identifiers, annotations, paths, exception names, framework/library names,
+configuration keys, API names, code snippets, and company rule IDs are
+instructed to remain unchanged. Company rule text is loaded as UTF-8 and sent
+to the review pipeline exactly as written, independently of the output
+language.
+
+### Company-wide review rules
+
+An installation can load organization policy from one or more trusted local
+UTF-8 Markdown or plain-text files. Paths are resolved relative to the YAML
+file that defines them; Mira reads these local files directly and never reads
+their contents from the pull request branch.
+
+```yaml
+# mira.yaml
+review:
+  rules_file: "./company-rules.md"
+  # Optional additional files, kept in this order after rules_file:
+  rules_files:
+    - "./security-rules.md"
+    - "./quality-rules.md"
+  rules_max_file_size: 256000  # per file, in bytes
+```
+
+Each file is included as one compact rule block without an extra LLM parsing
+call. Repeating the same resolved path loads it once. A configured file that
+is missing, unreadable, empty, invalid UTF-8, or over the size limit stops the
+review with a clear configuration error; Mira does not silently omit policy.
+
+All rule sources remain additive. When instructions conflict, precedence is:
+company files, repository contributor conventions, repository custom rules,
+global dashboard rules, learned preferences, then Mira's built-in behavior.
+Company-file prompts include only the source filename as provenance, never the
+resolved installation path.
+
+The terminal command uses the same loader, main review prompt, agentic loop,
+and self-critique path as webhook reviews:
+
+```bash
+mira review https://github.com/org/repo/pull/123 --config ./mira.yaml
+```
+
 ## Development
 
 ```bash

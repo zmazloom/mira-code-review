@@ -168,7 +168,9 @@ async def detect_overlaps(
     )
 
     # Stage 2 — one batched LLM judgment over the shortlist.
-    messages = build_overlap_prompt(pr_info, current, survivors)
+    messages = build_overlap_prompt(
+        pr_info, current, survivors, output_language=config.review.prompt_output_language
+    )
     try:
         raw = await llm.complete(messages, json_mode=True)
     except Exception as exc:  # noqa: BLE001

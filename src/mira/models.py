@@ -5,6 +5,9 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 
+from mira.localization import is_persian, severity_label
+from mira.localization import label as localized_label
+
 WALKTHROUGH_MARKER = "<!-- mira-walkthrough -->"
 
 
@@ -141,7 +144,9 @@ class ReviewComment:
     source_pass: str = "main"
 
 
-def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
+def _format_stats_breakdown(
+    stats: dict[Severity, int], output_language: str = "en"
+) -> str:
     """Format severity counts as a parenthetical breakdown, e.g. ' (1 blocker, 2 warnings)'."""
     labels = {
         Severity.BLOCKER: "blocker",
@@ -153,8 +158,9 @@ def _format_stats_breakdown(stats: dict[Severity, int]) -> str:
     for sev in (Severity.BLOCKER, Severity.WARNING, Severity.SUGGESTION, Severity.NITPICK):
         count = stats.get(sev, 0)
         if count:
-            name = labels[sev]
-            items.append(f"{sev.emoji} {count} {name}{'s' if count != 1 else ''}")
+            name = severity_label(labels[sev], output_language)
+            plural = "s" if output_language == "en" and count != 1 else ""
+            items.append(f"{sev.emoji} {count} {name}{plural}")
     return f" ({', '.join(items)})" if items else ""
 
 
@@ -212,9 +218,12 @@ class WalkthroughResult:
         dashboard_url: str = "",
         overlaps: list[OverlapFinding] | None = None,
         failure_notice: str | None = None,
+        output_language: str = "en",
     ) -> str:
         """Render as a markdown PR comment."""
-        parts = [WALKTHROUGH_MARKER, "## Mira PR Walkthrough", ""]
+        fa = is_persian(output_language)
+        heading = "## مرور تغییرات PR توسط Mira" if fa else "## Mira PR Walkthrough"
+        parts = [WALKTHROUGH_MARKER, heading, ""]
         parts.append(self.summary)
 
         if self.sequence_diagram:
@@ -238,27 +247,38 @@ class WalkthroughResult:
             parts.append("")
             parts.append(
                 f"<details>\n"
-                f"<summary><b>Confidence: {score}/5</b> &nbsp; {filled}{empty} &nbsp; {label}</summary>\n"
+                f"<summary><b>{localized_label('confidence', output_language)}: "
+                f"{score}/5</b> &nbsp; {filled}{empty} &nbsp; {label}</summary>\n"
             )
             if cs.reason:
                 parts.append(f"- {cs.reason}")
             if key_issues:
                 parts.append("")
-                parts.append("**Key files to review:**")
+                parts.append("**فایل‌های کلیدی برای بررسی:**" if fa else "**Key files to review:**")
                 for ki in key_issues:
                     parts.append(f"- `{ki.path}:{ki.line}` — {ki.issue}")
             parts.append("")
             parts.append("</details>")
 
         if overlaps:
-            _kind_label = {
-                "merge_conflict": "merge-conflict risk",
-                "duplicate_effort": "duplicate effort",
-                "both": "duplicate effort + merge-conflict risk",
-            }
+            _kind_label = (
+                {
+                    "merge_conflict": "خطر تداخل ادغام",
+                    "duplicate_effort": "کار تکراری",
+                    "both": "کار تکراری + خطر تداخل ادغام",
+                }
+                if fa
+                else {
+                    "merge_conflict": "merge-conflict risk",
+                    "duplicate_effort": "duplicate effort",
+                    "both": "duplicate effort + merge-conflict risk",
+                }
+            )
             parts.append("")
             parts.append(
-                "> **⚠️ Potential overlap with other open PRs** — these may be stepping on this one:"
+                "> **⚠️ هم‌پوشانی احتمالی با PRهای باز دیگر** — ممکن است با این PR تداخل داشته باشند:"
+                if fa
+                else "> **⚠️ Potential overlap with other open PRs** — these may be stepping on this one:"
             )
             parts.append(">")
             for ov in overlaps:
@@ -268,8 +288,12 @@ class WalkthroughResult:
                 if ov.shared_files:
                     shown = ", ".join(f"`{p}`" for p in ov.shared_files[:3])
                     if len(ov.shared_files) > 3:
-                        shown += f" +{len(ov.shared_files) - 3} more"
-                    line += f" Shared: {shown}"
+                        shown += (
+                            f" +{len(ov.shared_files) - 3} مورد دیگر"
+                            if fa
+                            else f" +{len(ov.shared_files) - 3} more"
+                        )
+                    line += f" {'مشترک' if fa else 'Shared'}: {shown}"
                 parts.append(line)
             parts.append("")
 
@@ -277,38 +301,56 @@ class WalkthroughResult:
             parts.append("")
             total_refs = sum(len(e.get("files", [])) for e in blast_radius)
             repo_count = len(blast_radius)
-            header = f"{'repository' if repo_count == 1 else 'repositories'}"
-
-            parts.append(
-                f"> **Blast Radius** \u2014 {repo_count} dependent {header}, {total_refs} total references"
-            )
+            if fa:
+                parts.append(
+                    f"> **دامنه اثر** — {repo_count} مخزن وابسته، در مجموع {total_refs} ارجاع"
+                )
+            else:
+                header = f"{'repository' if repo_count == 1 else 'repositories'}"
+                parts.append(
+                    f"> **Blast Radius** \u2014 {repo_count} dependent {header}, {total_refs} total references"
+                )
             parts.append(">")
             for entry in blast_radius:
                 repo = entry.get("repo", "")
                 files = entry.get("files", [])
-                parts.append(
-                    f"> `{repo}` \u2014 {len(files)} reference{'s' if len(files) != 1 else ''}"
-                )
+                if fa:
+                    parts.append(f"> `{repo}` — {len(files)} ارجاع")
+                else:
+                    parts.append(
+                        f"> `{repo}` \u2014 {len(files)} reference{'s' if len(files) != 1 else ''}"
+                    )
             parts.append("")
 
         if in_progress:
             parts.append("")
-            parts.append("*\u23f3 Code review in progress\u2026*")
+            parts.append("*⏳ بررسی کد در حال انجام است…*" if fa else "*\u23f3 Code review in progress\u2026*")
         else:
             stats_parts: list[str] = []
             if reviewed_files:
-                stats_parts.append(
-                    f"{reviewed_files} file{'s' if reviewed_files != 1 else ''} reviewed"
-                )
+                if fa:
+                    stats_parts.append(f"{reviewed_files} فایل بررسی شد")
+                else:
+                    stats_parts.append(
+                        f"{reviewed_files} file{'s' if reviewed_files != 1 else ''} reviewed"
+                    )
             if total_comments:
-                comment_detail = _format_stats_breakdown(review_stats) if review_stats else ""
-                stats_parts.append(
-                    f"{total_comments} comment{'s' if total_comments != 1 else ''}{comment_detail}"
+                comment_detail = (
+                    _format_stats_breakdown(review_stats, output_language) if review_stats else ""
                 )
+                if fa:
+                    stats_parts.append(f"{total_comments} نظر{comment_detail}")
+                else:
+                    stats_parts.append(
+                        f"{total_comments} comment{'s' if total_comments != 1 else ''}{comment_detail}"
+                    )
             if existing_issues:
-                stats_parts.append(
-                    f"{existing_issues} unresolved thread{'s' if existing_issues != 1 else ''}"
-                )
+                if fa:
+                    stats_parts.append(f"{existing_issues} گفت‌وگوی حل‌نشده")
+                else:
+                    stats_parts.append(
+                        f"{existing_issues} unresolved thread{'s' if existing_issues != 1 else ''}"
+                    )
             if stats_parts:
                 separator = " \u00b7 "
                 parts.append("")
@@ -320,39 +362,66 @@ class WalkthroughResult:
             parts.append("")
             parts.append("---")
             parts.append("")
-            parts.append(f"### \ud83d\udccb Reviewed {reviewed_files} of {total} files")
-            parts.append("")
             parts.append(
-                "This PR is large enough that some files were skipped to keep the "
-                "review focused on the highest-priority changes. To review the rest, "
-                f"comment `@{bot_name} review-rest` on this PR."
+                f"### 📋 {reviewed_files} فایل از {total} فایل بررسی شد"
+                if fa
+                else f"### \ud83d\udccb Reviewed {reviewed_files} of {total} files"
             )
             parts.append("")
-            parts.append("**Skipped:**")
+            parts.append(
+                (
+                    "این PR به‌اندازه‌ای بزرگ است که برای تمرکز بررسی بر تغییرات با اولویت بالاتر، "
+                    f"برخی فایل‌ها نادیده گرفته شدند. برای بررسی بقیه، روی این PR دستور `@{bot_name} review-rest` را بنویسید."
+                )
+                if fa
+                else (
+                    "This PR is large enough that some files were skipped to keep the "
+                    "review focused on the highest-priority changes. To review the rest, "
+                    f"comment `@{bot_name} review-rest` on this PR."
+                )
+            )
+            parts.append("")
+            parts.append("**نادیده‌گرفته‌شده:**" if fa else "**Skipped:**")
             for p in skipped_paths[:shown]:
                 parts.append(f"- `{p}`")
             if len(skipped_paths) > shown:
-                parts.append(f"- _\u2026and {len(skipped_paths) - shown} more_")
+                parts.append(
+                    f"- _…و {len(skipped_paths) - shown} مورد دیگر_"
+                    if fa
+                    else f"- _\u2026and {len(skipped_paths) - shown} more_"
+                )
 
         if index_was_empty and not in_progress:
             parts.append("")
             parts.append("---")
             parts.append("")
-            link = f"[Mira dashboard]({dashboard_url})" if dashboard_url else "the Mira dashboard"
-            parts.append(
-                f"> 💡 **This review will be more accurate after indexing.** "
-                f"This repo hasn't been indexed yet, so the review is based on "
-                f"the diff plus on-demand file lookups. Visit {link} to index "
-                f"this repo — Mira will then know about callers, dependents, "
-                f"and cross-repo impact."
-            )
+            if fa:
+                link = f"[داشبورد Mira]({dashboard_url})" if dashboard_url else "داشبورد Mira"
+                parts.append(
+                    f"> 💡 **این بررسی پس از ایندکس‌گذاری دقیق‌تر خواهد بود.** "
+                    f"این مخزن هنوز ایندکس نشده است؛ بنابراین بررسی بر اساس diff و خواندن درخواستی فایل‌ها انجام شده است. "
+                    f"برای ایندکس‌کردن مخزن به {link} بروید تا Mira فراخوان‌ها، وابستگی‌ها و اثر بین‌مخزنی را نیز بشناسد."
+                )
+            else:
+                link = (
+                    f"[Mira dashboard]({dashboard_url})" if dashboard_url else "the Mira dashboard"
+                )
+                parts.append(
+                    f"> 💡 **This review will be more accurate after indexing.** "
+                    f"This repo hasn't been indexed yet, so the review is based on "
+                    f"the diff plus on-demand file lookups. Visit {link} to index "
+                    f"this repo — Mira will then know about callers, dependents, "
+                    f"and cross-repo impact."
+                )
 
         if failure_notice:
             parts.append("")
             parts.append("---")
             parts.append("")
             parts.append(
-                "<details>\n<summary><b>❌ Review failed</b> — click for details</summary>\n"
+                "<details>\n<summary><b>❌ بررسی ناموفق بود</b> — برای جزئیات کلیک کنید</summary>\n"
+                if fa
+                else "<details>\n<summary><b>❌ Review failed</b> — click for details</summary>\n"
             )
             parts.append("")
             parts.append(failure_notice)
@@ -362,7 +431,9 @@ class WalkthroughResult:
         parts.append("")
         parts.append("---")
         parts.append(
-            f"> Comment `@{bot_name} help` to get the list of available commands and usage tips."
+            f"> برای دیدن فهرست دستورهای موجود و راهنمای استفاده، `@{bot_name} help` را بنویسید."
+            if fa
+            else f"> Comment `@{bot_name} help` to get the list of available commands and usage tips."
         )
 
         return "\n".join(parts)
@@ -399,6 +470,8 @@ class ReviewResult:
     # filter/critique stage, so a benchmark run can show whether a missed
     # finding was never drafted or drafted-then-dropped. Not posted anywhere.
     audit: list[dict] = field(default_factory=list)
+    # Internal render context only; JSON/tool schemas deliberately remain unchanged.
+    output_language: str = "en"
 
 
 @dataclass

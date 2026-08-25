@@ -21,6 +21,7 @@ from mira.llm import create_llm
 from mira.llm.prompts.review import build_conversation_prompt
 from mira.llm.tool_schemas import SUBMIT_THREAD_REPLY_TOOL
 from mira.llm.utils import strip_code_fences, strip_think_blocks
+from mira.localization import append_language_instruction, is_persian
 
 logger = logging.getLogger(__name__)
 
@@ -258,9 +259,11 @@ async def run_pr_command(
             diff_text=diff_text,
             pr_title=pr_info.title,
             pr_description=pr_info.description,
+            output_language=config.review.prompt_output_language,
         )
         response = await llm.complete(messages, json_mode=False)
-        await provider.post_comment(pr_info, f"> @{actor} asked: {question}\n\n{response}")
+        asked = "پرسید" if is_persian(config.review.output_language) else "asked"
+        await provider.post_comment(pr_info, f"> @{actor} {asked}: {question}\n\n{response}")
         logger.info("Replied to comment on %s", pr_url)
 
 
@@ -292,6 +295,7 @@ async def run_thread_reply(
         user_reply=human_reply or "(empty)",
         original_suggestion=original_suggestion,
     )
+    prompt = append_language_instruction(prompt, config.review.prompt_output_language)
     # Tool calling forces a schema-valid result — more reliable than parsing
     # free-form JSON. The provider's tenacity decorator retries transient fails.
     try:

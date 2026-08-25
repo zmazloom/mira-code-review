@@ -22,6 +22,7 @@ from urllib.parse import quote
 import httpx
 
 from mira.exceptions import ProviderError
+from mira.localization import is_persian
 from mira.models import (
     BotThreadRecord,
     FileHistoryEntry,
@@ -272,9 +273,14 @@ class ForgejoProvider(BaseProvider):
 
         summary_text = ""
         if result.summary:
-            summary_text = f"**Mira Review Summary**\n\n{result.summary}"
+            summary_label = (
+                "خلاصه مرور Mira"
+                if is_persian(result.output_language)
+                else "Mira Review Summary"
+            )
+            summary_text = f"**{summary_label}**\n\n{result.summary}"
         if result.key_issues:
-            summary_text += format_key_issues(result.key_issues)
+            summary_text += format_key_issues(result.key_issues, result.output_language)
 
         review_body = {
             "event": "COMMENT",
@@ -283,7 +289,11 @@ class ForgejoProvider(BaseProvider):
             "comments": [
                 {
                     "path": comment.path,
-                    "body": format_comment_body(comment, bot_name=bot_name),
+                    "body": format_comment_body(
+                        comment,
+                        bot_name=bot_name,
+                        output_language=result.output_language,
+                    ),
                     "new_position": comment.line,
                 }
                 for comment in result.comments
@@ -301,7 +311,11 @@ class ForgejoProvider(BaseProvider):
                     except ProviderError:
                         logger.warning("Failed to post PR summary comment (fallback)")
                 for comment in result.comments:
-                    body = format_comment_body(comment, bot_name=bot_name)
+                    body = format_comment_body(
+                        comment,
+                        bot_name=bot_name,
+                        output_language=result.output_language,
+                    )
                     note = f"**`{comment.path}:{comment.line}`**\n\n{body}"
                     try:
                         await self.post_comment(pr_info, note)

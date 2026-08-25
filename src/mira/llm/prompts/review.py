@@ -11,6 +11,7 @@ from mira.config import MiraConfig
 from mira.core.context import build_file_context_string
 from mira.llm.prompts.footguns import get_footguns_for_files
 from mira.llm.prompts.verify_fixes import _extract_issue_description
+from mira.localization import append_language_instruction
 from mira.models import FileDiff, UnresolvedThread
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -37,6 +38,7 @@ def build_review_prompt(
     review_round: int = 1,
     resolved_threads: list[dict] | None = None,
     team_conventions: str = "",
+    company_rules: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     """Build the review prompt messages for the LLM.
 
@@ -94,7 +96,11 @@ def build_review_prompt(
         review_round=review_round,
         resolved_threads=resolved_threads,
         team_conventions=team_conventions,
+        company_rules=company_rules,
         footguns=footguns,
+    )
+    system_content = append_language_instruction(
+        system_content, config.review.prompt_output_language
     )
 
     # Build user message with optional code context before diffs
@@ -112,6 +118,7 @@ def build_review_prompt(
 def build_security_review_prompt(
     files: list[FileDiff],
     pr_title: str = "",
+    output_language: str | None = None,
 ) -> list[dict[str, str]]:
     """Build the security-focused review prompt messages for the LLM.
 
@@ -124,6 +131,7 @@ def build_security_review_prompt(
     file_contexts = [build_file_context_string(f) for f in files]
     file_paths = [f.path for f in files]
     system_content = template.render(pr_title=pr_title, file_paths=file_paths)
+    system_content = append_language_instruction(system_content, output_language)
     return [
         {"role": "system", "content": system_content},
         {"role": "user", "content": "\n\n".join(file_contexts)},
@@ -134,6 +142,7 @@ def build_dependency_review_prompt(
     files: list[FileDiff],
     existing_packages: list[str] | None = None,
     pr_title: str = "",
+    output_language: str | None = None,
 ) -> list[dict[str, str]]:
     """Build the dependency-overlap review prompt messages for the LLM.
 
@@ -152,6 +161,7 @@ def build_dependency_review_prompt(
         file_paths=file_paths,
         existing_packages=existing_packages or [],
     )
+    system_content = append_language_instruction(system_content, output_language)
     return [
         {"role": "system", "content": system_content},
         {"role": "user", "content": "\n\n".join(file_contexts)},
@@ -202,6 +212,9 @@ def build_walkthrough_prompt(
         files_metadata=files_metadata,
         include_sequence_diagram=config.review.walkthrough_sequence_diagram,
     )
+    system_content = append_language_instruction(
+        system_content, config.review.prompt_output_language
+    )
 
     return [
         {"role": "system", "content": system_content},
@@ -214,6 +227,7 @@ def build_conversation_prompt(
     diff_text: str,
     pr_title: str = "",
     pr_description: str = "",
+    output_language: str | None = None,
 ) -> list[dict[str, str]]:
     """Build prompt messages for a conversational reply about a PR."""
     env = _get_template_env()
@@ -223,6 +237,7 @@ def build_conversation_prompt(
         pr_title=pr_title,
         pr_description=pr_description,
     )
+    system_content = append_language_instruction(system_content, output_language)
 
     user_content = f"## Diff\n\n```diff\n{diff_text}\n```\n\n## Question\n\n{question}"
 

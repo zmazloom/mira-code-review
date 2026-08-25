@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from mira.analysis.severity import classify_severity
 from mira.config import MiraConfig
 from mira.core.chunker import chunk_files
+from mira.core.company_rules import load_company_rules
 from mira.core.context import expand_context
 from mira.core.diff_parser import parse_diff
 from mira.core.ensemble import merge_ensemble_runs
@@ -42,6 +43,7 @@ from mira.llm.response_parser import (
     parse_llm_response,
     parse_walkthrough_response,
 )
+from mira.localization import is_persian
 from mira.models import (
     WALKTHROUGH_MARKER,
     FileChangeType,
@@ -412,7 +414,15 @@ class ReviewEngine:
         """
         if not self.provider:
             return None
-        placeholder = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*🔍 Reviewing this PR…*\n"
+        if is_persian(self.config.review.output_language):
+            placeholder = (
+                f"{WALKTHROUGH_MARKER}\n## مرور تغییرات PR توسط Mira\n\n"
+                "*🔍 در حال بررسی این PR…*\n"
+            )
+        else:
+            placeholder = (
+                f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*🔍 Reviewing this PR…*\n"
+            )
         existing_id = await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
         if existing_id is not None:
             await self.provider.update_comment(pr_info, existing_id, placeholder)
@@ -420,10 +430,16 @@ class ReviewEngine:
         await self.provider.post_comment(pr_info, placeholder)
         return await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
 
-    @staticmethod
-    def _format_failure_notice(exc: BaseException) -> str:
+    def _format_failure_notice(self, exc: BaseException) -> str:
         """Format a user-safe failure notice without model names or internal errors."""
         message = exc.safe_message if isinstance(exc, MiraError) else type(exc).__name__
+        if is_persian(self.config.review.output_language):
+            return (
+                "بررسی کد به‌دلیل یک خطای پیش‌بینی‌نشده کامل نشد.\n\n"
+                "**مرحله:** بررسی کد\n"
+                f"**نوع خطا:** `{type(exc).__name__}`\n"
+                "**پیام:** بررسی کد کامل نشد."
+            )
         return (
             f"The code review failed to complete due to an unexpected error.\n\n"
             f"**Stage:** Code review\n"
@@ -573,6 +589,7 @@ class ReviewEngine:
                 markdown = wt.to_markdown(
                     bot_name=self.bot_name or "miracodeai",
                     in_progress=True,
+                    output_language=self.config.review.output_language,
                 )
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)
                 _walkthrough_result[0] = wt
@@ -721,17 +738,29 @@ class ReviewEngine:
                             bot_name=self.bot_name or "miracodeai",
                             in_progress=False,
                             failure_notice=self._format_failure_notice(exc),
+                            output_language=self.config.review.output_language,
                         )
                     else:
-                        failure_body = (
-                            f"{WALKTHROUGH_MARKER}\n"
-                            "## Mira PR Walkthrough\n\n"
-                            "---\n\n"
-                            "<details>\n"
-                            "<summary><b>❌ Review failed</b> — click for details</summary>\n\n"
-                            f"{self._format_failure_notice(exc)}\n\n"
-                            "</details>\n"
-                        )
+                        if is_persian(self.config.review.output_language):
+                            failure_body = (
+                                f"{WALKTHROUGH_MARKER}\n"
+                                "## مرور تغییرات PR توسط Mira\n\n"
+                                "---\n\n"
+                                "<details>\n"
+                                "<summary><b>❌ بررسی ناموفق بود</b> — برای جزئیات کلیک کنید</summary>\n\n"
+                                f"{self._format_failure_notice(exc)}\n\n"
+                                "</details>\n"
+                            )
+                        else:
+                            failure_body = (
+                                f"{WALKTHROUGH_MARKER}\n"
+                                "## Mira PR Walkthrough\n\n"
+                                "---\n\n"
+                                "<details>\n"
+                                "<summary><b>❌ Review failed</b> — click for details</summary>\n\n"
+                                f"{self._format_failure_notice(exc)}\n\n"
+                                "</details>\n"
+                            )
                     await self.provider.update_comment(pr_info, placeholder_id, failure_body)
                 except Exception as comment_exc:
                     logger.warning(
@@ -842,6 +871,7 @@ class ReviewEngine:
                         index_was_empty=getattr(self, "_index_was_empty", False),
                         dashboard_url=_os.environ.get("MIRA_DASHBOARD_URL", ""),
                         overlaps=overlaps or None,
+                        output_language=self.config.review.output_language,
                     )
                     comment_id = placeholder_id
                     if comment_id is None:
@@ -858,8 +888,12 @@ class ReviewEngine:
             # No walkthrough (all files excluded, empty diff, or generation
             # failed) — finalize the placeholder so it doesn't sit on
             # "Reviewing this PR…" forever.
-            reason = result.skipped_reason or result.summary or "Walkthrough was not generated."
-            markdown = f"{WALKTHROUGH_MARKER}\n## Mira PR Walkthrough\n\n*{reason}*\n"
+            fa = is_persian(self.config.review.output_language)
+            reason = result.skipped_reason or result.summary or (
+                "مرور تغییرات تولید نشد." if fa else "Walkthrough was not generated."
+            )
+            heading = "## مرور تغییرات PR توسط Mira" if fa else "## Mira PR Walkthrough"
+            markdown = f"{WALKTHROUGH_MARKER}\n{heading}\n\n*{reason}*\n"
             try:
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)
             except Exception as exc:
@@ -1034,17 +1068,38 @@ class ReviewEngine:
         """
         import asyncio as _asyncio
 
+        # Company policy is trusted local configuration and mandatory when
+        # configured. Load it before starting any LLM work so missing or
+        # malformed files fail the review explicitly.
+        company_rules = load_company_rules(self.config)
+
         # Parse the full diff (not just the priority-selected subset) so the
         # walkthrough can surface skipped files to the user.
         patch = parse_diff(diff_text)
         if not patch.files:
-            return ReviewResult(summary="No files to review.")
+            return ReviewResult(
+                summary=(
+                    "فایلی برای بررسی وجود ندارد."
+                    if is_persian(self.config.review.output_language)
+                    else "No files to review."
+                ),
+                output_language=self.config.review.output_language,
+            )
 
         filtered = filter_files(patch.files, self.config.filter)
         if not filtered:
             return ReviewResult(
-                summary="All files were filtered out.",
-                skipped_reason="All files matched exclusion rules",
+                summary=(
+                    "همه فایل‌ها فیلتر شدند."
+                    if is_persian(self.config.review.output_language)
+                    else "All files were filtered out."
+                ),
+                skipped_reason=(
+                    "همه فایل‌ها با قواعد حذف مطابقت داشتند"
+                    if is_persian(self.config.review.output_language)
+                    else "All files matched exclusion rules"
+                ),
+                output_language=self.config.review.output_language,
             )
 
         only_paths = getattr(self, "_review_only_paths", None)
@@ -1056,8 +1111,17 @@ class ReviewEngine:
         )
         if not selected:
             return ReviewResult(
-                summary="No files were selected for review.",
-                skipped_reason="All files exceeded size limits or were deprioritized.",
+                summary=(
+                    "فایلی برای بررسی انتخاب نشد."
+                    if is_persian(self.config.review.output_language)
+                    else "No files were selected for review."
+                ),
+                skipped_reason=(
+                    "همه فایل‌ها از محدودیت اندازه عبور کردند یا اولویت پایین‌تری داشتند."
+                    if is_persian(self.config.review.output_language)
+                    else "All files exceeded size limits or were deprioritized."
+                ),
+                output_language=self.config.review.output_language,
             )
 
         all_paths = [f.path for f in filtered]
@@ -1269,7 +1333,10 @@ class ReviewEngine:
                             parts = rule_text.split(": ", 1)
                             title = parts[0] if len(parts) > 1 else "Global Rule"
                             content = parts[1] if len(parts) > 1 else rule_text
-                            custom_rules.insert(0, {"title": title, "content": content})
+                            # Repository-scoped custom rules were appended
+                            # above and intentionally outrank global dashboard
+                            # rules while both remain in the prompt.
+                            custom_rules.append({"title": title, "content": content})
                 except Exception:
                     pass
         except Exception:
@@ -1302,6 +1369,7 @@ class ReviewEngine:
                         pr_description=pr_description,
                         existing_comments=base_existing or None,
                         code_context=code_context_block,
+                        company_rules=company_rules or None,
                         learned_rules=learned_rules or None,
                         custom_rules=custom_rules or None,
                         file_history=chunk_history or None,
@@ -1337,7 +1405,12 @@ class ReviewEngine:
                             source_fetcher=self._agentic_source_fetcher,  # type: ignore[arg-type]
                             repo_tree=list(self._agentic_repo_tree),
                         )
-                        raw_response = await agentic_review_loop(self.llm, messages, executor)
+                        raw_response = await agentic_review_loop(
+                            self.llm,
+                            messages,
+                            executor,
+                            output_language=self.config.review.prompt_output_language,
+                        )
                         audit.append({"stage": "agentic", "chunk": idx, "calls": executor.call_log})
                     if not raw_response:
                         raw_response = await self.llm.review(messages)
@@ -1406,6 +1479,7 @@ class ReviewEngine:
                 _security_relevant_files(filtered),
                 pr_title,
                 security_llm=self.security_llm,
+                output_language=self.config.review.prompt_output_language,
             )
             if self.config.review.security_pass
             else _asyncio.sleep(0, result=[])
@@ -1446,6 +1520,7 @@ class ReviewEngine:
                 existing_packages,
                 pr_title,
                 indexing_llm=self.indexing_llm,
+                output_language=self.config.review.prompt_output_language,
             )
             if manifest_files
             else _asyncio.sleep(0, result=[])
@@ -1454,7 +1529,11 @@ class ReviewEngine:
         from mira.security.pr_scan import scan_manifest_changes
 
         osv_task = _asyncio.create_task(
-            scan_manifest_changes(manifest_files, pr_source_fetcher)
+            scan_manifest_changes(
+                manifest_files,
+                pr_source_fetcher,
+                output_language=self.config.review.output_language,
+            )
             if manifest_files and self.config.review.osv_scan and pr_source_fetcher is not None
             else _asyncio.sleep(0, result=[])
         )
@@ -1515,11 +1594,13 @@ class ReviewEngine:
                 final_comments = await self_critique(
                     self.llm,
                     final_comments,
+                    company_rules=company_rules or None,
                     learned_rules=learned_rules or None,
                     custom_rules=custom_rules or None,
                     indexing_llm=self.indexing_llm,
                     diff_files=critique_files,
                     audit=audit,
+                    output_language=self.config.review.prompt_output_language,
                 )
             except Exception as exc:
                 logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
@@ -1539,10 +1620,15 @@ class ReviewEngine:
                     pr_description,
                     fallback=original_summary,
                     indexing_llm=self.indexing_llm,
+                    output_language=self.config.review.prompt_output_language,
                 )
             except Exception as exc:
                 logger.warning("Summary regeneration failed, using original: %s", exc)
-                summary = original_summary or "No issues found."
+                summary = original_summary or (
+                    "مشکلی یافت نشد."
+                    if is_persian(self.config.review.output_language)
+                    else "No issues found."
+                )
         else:
             summary = ""
 
@@ -1559,4 +1645,5 @@ class ReviewEngine:
             skipped_paths=skipped_paths_only,
             total_paths=all_paths,
             audit=audit,
+            output_language=self.config.review.output_language,
         )

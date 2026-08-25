@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import re
 
+from mira.localization import is_persian
 from mira.models import KeyIssue, ReviewComment, Severity
 
 _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
@@ -27,6 +28,20 @@ _CATEGORY_DISPLAY: dict[str, tuple[str, str]] = {
     "other": ("\U0001f4cc", "Note"),
 }
 
+_CATEGORY_DISPLAY_FA: dict[str, tuple[str, str]] = {
+    "bug": ("🐛", "اشکال"),
+    "security": ("🔒", "مشکل امنیتی"),
+    "performance": ("⚡", "کارایی"),
+    "error-handling": ("⚠️", "مدیریت خطا"),
+    "race-condition": ("🏁", "شرایط رقابتی"),
+    "resource-leak": ("💧", "نشت منابع"),
+    "maintainability": ("🔧", "پیشنهاد بازآرایی"),
+    "style": ("🎨", "سبک"),
+    "clarity": ("📝", "وضوح"),
+    "configuration": ("⚙️", "پیکربندی"),
+    "other": ("📌", "نکته"),
+}
+
 _SEVERITY_BADGE: dict[Severity, str] = {
     Severity.BLOCKER: "\U0001f6d1 Blocker — must fix before merge",
     Severity.WARNING: "⚠️ Warning",
@@ -34,7 +49,18 @@ _SEVERITY_BADGE: dict[Severity, str] = {
     Severity.NITPICK: "\U0001f4ac Nitpick",
 }
 
-_LABEL_TO_CATEGORY = {label: cat for cat, (_, label) in _CATEGORY_DISPLAY.items()}
+_SEVERITY_BADGE_FA: dict[Severity, str] = {
+    Severity.BLOCKER: "🛑 بحرانی — باید پیش از ادغام رفع شود",
+    Severity.WARNING: "⚠️ هشدار",
+    Severity.SUGGESTION: "💡 پیشنهاد",
+    Severity.NITPICK: "💬 نکته جزئی",
+}
+
+_LABEL_TO_CATEGORY = {
+    label: cat
+    for display in (_CATEGORY_DISPLAY, _CATEGORY_DISPLAY_FA)
+    for cat, (_, label) in display.items()
+}
 _CATEGORY_EMOJI_TO_NAME = {emoji: cat for cat, (emoji, _) in _CATEGORY_DISPLAY.items()}
 _SEVERITY_EMOJI_MAP: dict[str, str] = {
     "\U0001f6d1": "blocker",
@@ -110,14 +136,15 @@ def parse_bot_comment_metadata(body: str) -> dict[str, str]:
     return {"category": category, "severity": severity, "title": title}
 
 
-def format_key_issues(key_issues: list[KeyIssue]) -> str:
+def format_key_issues(key_issues: list[KeyIssue], output_language: str = "en") -> str:
     """Format key issues as a markdown table for the review body."""
+    fa = is_persian(output_language)
     lines = [
         "",
         "",
-        "### Key Issues",
+        "### مسائل کلیدی" if fa else "### Key Issues",
         "",
-        "| | Issue | Location |",
+        "| | مسئله | محل |" if fa else "| | Issue | Location |",
         "|---|---|---|",
     ]
     for ki in key_issues:
@@ -156,10 +183,17 @@ def _close_open_fences(parts: list[str]) -> None:
         parts.append("```")
 
 
-def format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") -> str:
+def format_comment_body(
+    comment: ReviewComment,
+    bot_name: str = "miracodeai",
+    output_language: str = "en",
+) -> str:
     """Format a review comment body with category badge, severity, and suggestion block."""
-    label = _CATEGORY_DISPLAY.get(comment.category, ("\U0001f4cc", "Note"))[1]
-    badge = _SEVERITY_BADGE.get(comment.severity, "")
+    fa = is_persian(output_language)
+    categories = _CATEGORY_DISPLAY_FA if fa else _CATEGORY_DISPLAY
+    label = categories.get(comment.category, ("\U0001f4cc", "نکته" if fa else "Note"))[1]
+    badges = _SEVERITY_BADGE_FA if fa else _SEVERITY_BADGE
+    badge = badges.get(comment.severity, "")
 
     # Two trailing spaces = a Markdown hard break. GitHub renders a bare
     # newline as a break but GitLab doesn't, so the category and severity
@@ -185,7 +219,8 @@ def format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") ->
     if comment.agent_prompt:
         prompt_text = comment.agent_prompt
         if comment.suggestion:
-            prompt_text += f"\n\nApply this code change:\n\n{html.unescape(comment.suggestion)}"
+            action = "این تغییر کد را اعمال کنید:" if fa else "Apply this code change:"
+            prompt_text += f"\n\n{action}\n\n{html.unescape(comment.suggestion)}"
 
         # A fenced block (not <pre>) — GitHub 422'd on <pre>-wrapped prompts.
         max_run = 0
@@ -203,7 +238,7 @@ def format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") ->
         parts.append("")
         parts.append(
             "<details>\n"
-            "<summary>Prompt for AI Agents</summary>\n"
+            f"<summary>{'دستور برای عامل‌های هوش مصنوعی' if fa else 'Prompt for AI Agents'}</summary>\n"
             "\n"
             f"{fence}\n{prompt_text}\n{fence}\n"
             "\n"
@@ -211,6 +246,10 @@ def format_comment_body(comment: ReviewComment, bot_name: str = "miracodeai") ->
         )
 
     parts.append("")
-    parts.append(f"> Not useful? Reply `@{bot_name} reject` to dismiss this suggestion.")
+    parts.append(
+        f"> مفید نبود؟ برای رد این پیشنهاد با `@{bot_name} reject` پاسخ دهید."
+        if fa
+        else f"> Not useful? Reply `@{bot_name} reject` to dismiss this suggestion."
+    )
 
     return "\n".join(parts)

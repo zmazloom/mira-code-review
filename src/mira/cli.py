@@ -16,6 +16,7 @@ from mira.config import load_config
 from mira.core.engine import ReviewEngine
 from mira.exceptions import MiraError
 from mira.llm import create_llm
+from mira.localization import is_persian, label, severity_label
 from mira.manual_review import (
     ManualReviewCommand,
     ManualReviewOutcome,
@@ -27,24 +28,29 @@ from mira.models import ReviewResult, Severity
 
 def _format_text(result: ReviewResult) -> str:
     """Format review result as human-readable text."""
+    fa = is_persian(result.output_language)
     lines: list[str] = []
 
     if result.thread_decisions:
         from mira.llm.prompts.verify_fixes import _extract_issue_description
 
-        lines.append("Thread resolution:")
+        lines.append("حل گفت‌وگوها:" if fa else "Thread resolution:")
         for d in result.thread_decisions:
-            status = "RESOLVE" if d.fixed else "KEEP"
+            status = ("حل‌شده" if d.fixed else "حفظ") if fa else ("RESOLVE" if d.fixed else "KEEP")
             desc = _extract_issue_description(d.body)
             if len(desc) > 80:
                 desc = desc[:77] + "..."
             lines.append(f"  [{status}] {d.path}:{d.line} — {desc}")
         fixed = sum(1 for d in result.thread_decisions if d.fixed)
-        lines.append(f"  {fixed}/{len(result.thread_decisions)} thread(s) would be resolved.")
+        lines.append(
+            f"  {fixed}/{len(result.thread_decisions)} گفت‌وگو حل خواهد شد."
+            if fa
+            else f"  {fixed}/{len(result.thread_decisions)} thread(s) would be resolved."
+        )
         lines.append("")
 
     if result.walkthrough:
-        lines.append(result.walkthrough.to_markdown())
+        lines.append(result.walkthrough.to_markdown(output_language=result.output_language))
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -54,19 +60,32 @@ def _format_text(result: ReviewResult) -> str:
         lines.append("")
 
     if not result.comments:
-        lines.append("No issues found.")
+        lines.append("مشکلی یافت نشد." if fa else "No issues found.")
         return "\n".join(lines)
 
     for i, c in enumerate(result.comments, 1):
-        lines.append(f"{i}. [{c.severity.name}] {c.path}:{c.line} — {c.title}")
+        displayed_severity = (
+            severity_label(c.severity.name, result.output_language)
+            if fa
+            else c.severity.name
+        )
+        lines.append(f"{i}. [{displayed_severity}] {c.path}:{c.line} — {c.title}")
         lines.append(f"   {c.body}")
         if c.suggestion:
-            lines.append(f"   Suggestion: {c.suggestion}")
+            lines.append(f"   {label('suggestion', result.output_language)}: {c.suggestion}")
         lines.append("")
 
-    lines.append(f"Reviewed {result.reviewed_files} files, {len(result.comments)} comments.")
+    lines.append(
+        f"{result.reviewed_files} فایل بررسی شد، {len(result.comments)} نظر."
+        if fa
+        else f"Reviewed {result.reviewed_files} files, {len(result.comments)} comments."
+    )
     if result.token_usage:
-        lines.append(f"Tokens used: {result.token_usage.get('total_tokens', 0)}")
+        lines.append(
+            f"توکن‌های مصرف‌شده: {result.token_usage.get('total_tokens', 0)}"
+            if fa
+            else f"Tokens used: {result.token_usage.get('total_tokens', 0)}"
+        )
 
     return "\n".join(lines)
 
@@ -127,35 +146,48 @@ def _format_manual_text(outcome: ManualReviewOutcome) -> str:
     """Format a manual PR/MR review with provider metadata for the terminal."""
     info = outcome.pr_info
     result = outcome.result
+    fa = is_persian(result.output_language)
     total_files = len(result.total_paths) if result.total_paths else result.reviewed_files
     if result.skipped_reason:
-        status = f"Completed with note: {result.skipped_reason}"
+        status = (
+            f"تکمیل شد با توضیح: {result.skipped_reason}"
+            if fa
+            else f"Completed with note: {result.skipped_reason}"
+        )
     elif outcome.posted:
-        status = "Completed and posted"
+        status = "تکمیل و منتشر شد" if fa else "Completed and posted"
         if not outcome.inline_posted:
-            status += " (summary only; inline findings suppressed)"
+            status += (
+                " (فقط خلاصه؛ یافته‌های درون‌خطی منتشر نشدند)"
+                if fa
+                else " (summary only; inline findings suppressed)"
+            )
     else:
-        status = "Completed (not posted)"
+        status = "تکمیل شد (منتشر نشد)" if fa else "Completed (not posted)"
 
     lines = [
-        f"Repository: {info.owner}/{info.repo}",
-        f"PR/MR number: {info.number}",
-        f"Title: {info.title}",
-        f"Author: {info.author or '(unknown)'}",
-        f"Base branch: {info.base_branch}",
-        f"Head branch: {info.head_branch}",
-        f"Files changed: {total_files}",
-        f"Review status: {status}",
+        f"{'مخزن' if fa else 'Repository'}: {info.owner}/{info.repo}",
+        f"{'شماره PR/MR' if fa else 'PR/MR number'}: {info.number}",
+        f"{label('title', result.output_language)}: {info.title}",
+        f"{'نویسنده' if fa else 'Author'}: {info.author or ('(نامشخص)' if fa else '(unknown)')}",
+        f"{'شاخه پایه' if fa else 'Base branch'}: {info.base_branch}",
+        f"{'شاخه مقصد' if fa else 'Head branch'}: {info.head_branch}",
+        f"{'فایل‌های تغییرکرده' if fa else 'Files changed'}: {total_files}",
+        f"{'وضعیت بررسی' if fa else 'Review status'}: {status}",
         "",
-        "Summary",
+        label("summary", result.output_language),
         "-------",
-        result.summary or "No summary was generated.",
+        result.summary or ("خلاصه‌ای تولید نشد." if fa else "No summary was generated."),
         "",
-        "Findings:",
+        f"{label('findings', result.output_language)}:",
     ]
 
     if not result.comments:
-        lines.append("No findings. The review completed successfully.")
+        lines.append(
+            "یافته‌ای وجود ندارد. بررسی با موفقیت تکمیل شد."
+            if fa
+            else "No findings. The review completed successfully."
+        )
     else:
         for comment in result.comments:
             location = f"{comment.path}:{comment.line}"
@@ -163,15 +195,20 @@ def _format_manual_text(outcome: ManualReviewOutcome) -> str:
                 location += f"-{comment.end_line}"
             lines.extend(
                 [
-                    f"- Severity: {comment.severity.name.lower()}",
-                    f"  File: {location}",
-                    f"  Title: {comment.title}",
-                    f"  Rationale: {comment.body}",
+                    f"- {label('severity', result.output_language)}: "
+                    f"{severity_label(comment.severity.name, result.output_language)}",
+                    f"  {label('file', result.output_language)}: {location}",
+                    f"  {label('title', result.output_language)}: {comment.title}",
+                    f"  {label('rationale', result.output_language)}: {comment.body}",
                 ]
             )
             if comment.suggestion:
-                lines.append(f"  Suggestion: {comment.suggestion}")
-            lines.append(f"  Confidence: {comment.confidence:.2f}")
+                lines.append(
+                    f"  {label('suggestion', result.output_language)}: {comment.suggestion}"
+                )
+            lines.append(
+                f"  {label('confidence', result.output_language)}: {comment.confidence:.2f}"
+            )
 
     return "\n".join(lines)
 
@@ -353,6 +390,7 @@ def review(
             )
             outcome = asyncio.run(command.execute(reference))
             result = outcome.result
+        result.output_language = config.review.output_language
     except MiraError as e:
         message = _redact_cli_secrets(e.safe_message, token, github_token, gitlab_token)
         raise click.ClickException(message) from e

@@ -12,6 +12,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from mira.index.manifests import parse_manifest
+from mira.localization import is_persian, severity_label
 from mira.models import FileDiff, ReviewComment, Severity
 from mira.security.osv import (
     PackageQuery,
@@ -66,6 +67,7 @@ async def scan_manifest_changes(
     fetcher: SourceFetcher,
     *,
     timeout_s: float = 15.0,
+    output_language: str = "en",
 ) -> list[ReviewComment]:
     """Flag PR-added packages with known OSV vulnerabilities. Fails open."""
     if not manifest_files:
@@ -113,6 +115,7 @@ async def scan_manifest_changes(
         return []
 
     comments: list[ReviewComment] = []
+    fa = is_persian(output_language)
     for q in queries:
         key = (q.ecosystem, q.name, q.version)
         vulns = results.get(key, [])
@@ -128,32 +131,58 @@ async def scan_manifest_changes(
         n = len(vulns)
         bullets: list[str] = []
         for v in vulns[:_MAX_VULNS_PER_COMMENT]:
-            bullet = f"- [{v.cve_id}]({v.advisory_url}) **{v.severity}**: {v.summary}"
+            displayed_severity = severity_label(v.severity, output_language)
+            description = "آسیب‌پذیری شناخته‌شده" if fa else v.summary
+            bullet = (
+                f"- [{v.cve_id}]({v.advisory_url}) **{displayed_severity}**: {description}"
+            )
             if v.fixed_in:
-                bullet += f" — fixed in {v.fixed_in}"
+                bullet += f" — {'رفع‌شده در' if fa else 'fixed in'} {v.fixed_in}"
             bullets.append(bullet)
 
-        body = (
-            f"OSV.dev reports {n} known vulnerabilit{'y' if n == 1 else 'ies'} "
-            f"affecting `{q.name}@{q.version}`, introduced by this PR:\n\n"
-        )
+        if fa:
+            body = (
+                f"OSV.dev وجود {n} آسیب‌پذیری شناخته‌شده را برای `{q.name}@{q.version}` "
+                "که توسط این PR اضافه شده است گزارش می‌کند:\n\n"
+            )
+        else:
+            body = (
+                f"OSV.dev reports {n} known vulnerabilit{'y' if n == 1 else 'ies'} "
+                f"affecting `{q.name}@{q.version}`, introduced by this PR:\n\n"
+            )
         body += "\n".join(bullets)
         if n > _MAX_VULNS_PER_COMMENT:
-            body += f"\n\n…and {n - _MAX_VULNS_PER_COMMENT} more — see the OSV links above."
+            body += (
+                f"\n\n…و {n - _MAX_VULNS_PER_COMMENT} مورد دیگر — پیوندهای OSV بالا را ببینید."
+                if fa
+                else f"\n\n…and {n - _MAX_VULNS_PER_COMMENT} more — see the OSV links above."
+            )
 
         all_fixed: list[str] = [v.fixed_in for v in vulns if v.fixed_in]
         if all_fixed:
             first_fixed = all_fixed[0]
-            body += f"\n\nUpgrade to {first_fixed} or later."
+            body += (
+                f"\n\nبه نسخه {first_fixed} یا بالاتر ارتقا دهید."
+                if fa
+                else f"\n\nUpgrade to {first_fixed} or later."
+            )
 
         distinct_fixes = sorted({v for fv in all_fixed for v in fv.split(", ") if v})
-        fixes_str = ", ".join(distinct_fixes) if distinct_fixes else "see advisory links"
-
-        agent_prompt = (
-            f"In {f.path}, upgrade the dependency {q.name} from {q.version} "
-            f"to a non-vulnerable version ({fixes_str}). "
-            f"Update any associated lockfile entries."
+        fixes_str = ", ".join(distinct_fixes) if distinct_fixes else (
+            "پیوندهای گزارش را ببینید" if fa else "see advisory links"
         )
+
+        if fa:
+            agent_prompt = (
+                f"در {f.path}، وابستگی {q.name} را از {q.version} به یک نسخه بدون آسیب‌پذیری "
+                f"({fixes_str}) ارتقا دهید. ورودی‌های lockfile مرتبط را نیز به‌روزرسانی کنید."
+            )
+        else:
+            agent_prompt = (
+                f"In {f.path}, upgrade the dependency {q.name} from {q.version} "
+                f"to a non-vulnerable version ({fixes_str}). "
+                f"Update any associated lockfile entries."
+            )
 
         comments.append(
             ReviewComment(
@@ -162,7 +191,11 @@ async def scan_manifest_changes(
                 end_line=None,
                 severity=severity,
                 category="security",
-                title=f"Known vulnerabilities in {q.name}@{q.version}",
+                title=(
+                    f"آسیب‌پذیری‌های شناخته‌شده در {q.name}@{q.version}"
+                    if fa
+                    else f"Known vulnerabilities in {q.name}@{q.version}"
+                ),
                 body=body,
                 confidence=0.9,
                 suggestion=None,

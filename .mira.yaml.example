@@ -60,6 +60,21 @@ filter:
   max_files: 50
 
 review:
+  # Language for generated review prose. Persian and English also localize
+  # Mira's fixed review labels; other BCP-47 language codes instruct the LLM.
+  # Omit this setting to preserve Mira's existing English behavior.
+  # output_language: "fa"
+  # Optional company-wide review policy loaded from this Mira installation.
+  # Relative paths resolve from the YAML file containing this setting. The
+  # files must be readable UTF-8 text and are never loaded from a PR branch.
+  # rules_file: "./company-rules.md"
+  # For several files, order is preserved. If both forms are set, rules_file
+  # is first, followed by rules_files; duplicate paths are loaded once.
+  # rules_files:
+  #   - "./security-rules.md"
+  #   - "./quality-rules.md"
+  # Maximum size of each company rule file in bytes.
+  # rules_max_file_size: 256000
   # Lines of context around hunks
   context_lines: 3
   # Maximum diff size in characters

@@ -25,6 +25,7 @@ from mira.llm.response_parser import (
     parse_llm_response,
 )
 from mira.llm.tool_schemas import SUBMIT_CRITIQUE_TOOL, SUBMIT_REVIEW_TOOL
+from mira.localization import append_language_instruction, is_persian
 from mira.models import KeyIssue, ReviewComment, Severity
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ async def agentic_review_loop(
     llm: LLMProvider,
     messages: list[dict],
     executor: object,
+    output_language: str | None = None,
 ) -> str:
     """Run an agentic tool-use loop until the LLM submits a review.
 
@@ -47,6 +49,10 @@ async def agentic_review_loop(
 
     tools = [*AGENTIC_TOOLS, SUBMIT_REVIEW_TOOL]
     convo: list[dict] = [dict(m) for m in messages]
+    if convo:
+        convo[0]["content"] = append_language_instruction(
+            str(convo[0].get("content", "")), output_language
+        )
     if convo and convo[0].get("role") == "system":
         convo[0]["content"] = (
             convo[0]["content"] + "\n\n## Tools\n\n"
@@ -67,6 +73,10 @@ async def agentic_review_loop(
             msg = await llm.complete_agentic(convo, tools=tools)
         except Exception as exc:
             logger.warning("Agentic hop %d failed: %s", hop + 1, exc)
+            return ""
+
+        if not isinstance(msg, dict):
+            logger.debug("Agentic hop %d returned a non-object response", hop + 1)
             return ""
 
         tool_calls = msg.get("tool_calls") or []
@@ -135,6 +145,7 @@ async def security_review_pass(
     narrowed: list,
     pr_title: str = "",
     security_llm: LLMProvider | None = None,
+    output_language: str | None = None,
 ) -> list[ReviewComment]:
     """Dedicated security review on the security tier (``security_model`` → review model).
 
@@ -164,7 +175,9 @@ async def security_review_pass(
         provider=sec_llm if hasattr(sec_llm, "count_tokens") else None,
     )
     if len(chunks) <= 1:
-        return await _security_scan_once(sec_llm, llm, target_files, pr_title)
+        return await _security_scan_once(
+            sec_llm, llm, target_files, pr_title, output_language
+        )
 
     logger.info(
         "Security pass: splitting %d files into %d chunks (single-call budget %d tokens)",
@@ -176,7 +189,9 @@ async def security_review_pass(
 
     async def _bounded(chunk_files_list: list) -> list[ReviewComment]:
         async with sem:
-            return await _security_scan_once(sec_llm, llm, chunk_files_list, pr_title)
+            return await _security_scan_once(
+                sec_llm, llm, chunk_files_list, pr_title, output_language
+            )
 
     results = await asyncio.gather(*[_bounded(c.files) for c in chunks])
     return [c for chunk_comments in results for c in chunk_comments]
@@ -187,9 +202,12 @@ async def _security_scan_once(
     fallback_llm: LLMProvider,
     files: list,
     pr_title: str,
+    output_language: str | None,
 ) -> list[ReviewComment]:
     """Run the security scan on a single chunk of files."""
-    messages = build_security_review_prompt(files=files, pr_title=pr_title)
+    messages = build_security_review_prompt(
+        files=files, pr_title=pr_title, output_language=output_language
+    )
     try:
         raw = await sec_llm.complete_with_tools(
             messages=messages,
@@ -241,6 +259,7 @@ async def dependency_review_pass(
     existing_packages: list[str] | None = None,
     pr_title: str = "",
     indexing_llm: LLMProvider | None = None,
+    output_language: str | None = None,
 ) -> list[ReviewComment]:
     """Flag newly-added dependencies that duplicate an existing one.
 
@@ -261,6 +280,7 @@ async def dependency_review_pass(
         files=manifest_files,
         existing_packages=existing_packages,
         pr_title=pr_title,
+        output_language=output_language,
     )
     try:
         raw = await dep_llm.complete_with_tools(
@@ -352,6 +372,8 @@ async def self_critique(
     indexing_llm: LLMProvider | None = None,
     diff_files: list | None = None,
     audit: list[dict] | None = None,
+    company_rules: list[dict[str, str]] | None = None,
+    output_language: str | None = None,
 ) -> list[ReviewComment]:
     """Grade each draft comment's evidence and drop the unsupported ones.
 
@@ -363,8 +385,9 @@ async def self_critique(
     `diff_files`, when passed, lets the critic see the actual hunks each
     comment targets instead of judging from the truncated citation alone.
 
-    Team-documented preferences (learned + custom rules) are surfaced to the
-    critic so it doesn't drop comments that align with them as "style nits".
+    Team-documented preferences (company + custom + learned rules) are
+    surfaced to the critic so it doesn't drop comments that align with them
+    as "style nits".
 
     `indexing_llm`, when passed, is the caller's already-built indexing-tier
     provider; otherwise one is constructed from ``load_config()``.
@@ -389,17 +412,30 @@ async def self_critique(
         draft_lines.append(entry)
 
     rules_block = ""
-    rule_texts: list[str] = list(learned_rules or [])
+    company_texts = [r.get("content", "") for r in company_rules or []]
+    rule_texts: list[str] = []
     for r in custom_rules or []:
         title = (r.get("title") or "").strip()
         content = (r.get("content") or "").strip()
         rule_texts.append(f"{title}: {content}" if title else content)
-    if rule_texts:
-        rules_block = (
-            "## Team preferences (do NOT grade comments that enforce these as unsupported)\n\n"
-            + "\n".join(f"- {t}" for t in rule_texts)
-            + "\n\n"
-        )
+    rule_texts.extend(learned_rules or [])
+    if company_texts or rule_texts:
+        company_block = ""
+        if company_texts:
+            company_block = (
+                "## Company review rules (highest priority)\n\n"
+                + "\n\n".join(company_texts)
+                + "\n\n"
+            )
+        preferences_block = ""
+        if rule_texts:
+            preferences_block = (
+                "## Other team preferences "
+                "(do NOT grade comments that enforce these as unsupported)\n\n"
+                + "\n".join(f"- {t}" for t in rule_texts)
+                + "\n\n"
+            )
+        rules_block = company_block + preferences_block
 
     critic_prompt = (
         "You are grading draft PR comments produced by another reviewer. "
@@ -420,6 +456,7 @@ async def self_critique(
         "an idiom misuse) is `proven` even if reasonable people might ship "
         "it anyway.\n\n" + rules_block + "## Draft comments\n\n" + "\n".join(draft_lines)
     )
+    critic_prompt = append_language_instruction(critic_prompt, output_language)
 
     critic_llm = indexing_llm or _indexing_llm(llm)
 
@@ -487,6 +524,7 @@ async def regenerate_summary(
     pr_description: str,
     fallback: str,
     indexing_llm: LLMProvider | None = None,
+    output_language: str | None = None,
 ) -> str:
     """Rewrite the review summary from the final filed outputs.
 
@@ -499,7 +537,7 @@ async def regenerate_summary(
     provider; otherwise one is constructed from ``load_config()``.
     """
     if not comments and not key_issues:
-        return "No issues found."
+        return "مشکلی یافت نشد." if is_persian(output_language) else "No issues found."
 
     filed_lines = []
     for c in comments:
@@ -522,6 +560,7 @@ async def regenerate_summary(
         + "\n".join(filed_lines)
         + "\n\nReturn just the summary text — no preamble, no quotes."
     )
+    prompt = append_language_instruction(prompt, output_language)
 
     summary_llm = indexing_llm or _indexing_llm(llm)
 
@@ -533,7 +572,11 @@ async def regenerate_summary(
         )
     except Exception as exc:
         logger.warning("Summary regen LLM call failed: %s", exc)
-        return fallback or "No issues found."
+        return fallback or (
+            "مشکلی یافت نشد." if is_persian(output_language) else "No issues found."
+        )
 
     text = (text or "").strip()
-    return text or fallback or "No issues found."
+    return text or fallback or (
+        "مشکلی یافت نشد." if is_persian(output_language) else "No issues found."
+    )

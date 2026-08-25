@@ -15,6 +15,7 @@ from github import Github, GithubException
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from mira.exceptions import ProviderError
+from mira.localization import is_persian
 from mira.models import (
     BotThreadRecord,
     FileHistoryEntry,
@@ -422,7 +423,11 @@ class GitHubProvider(BaseProvider):
 
         review_comments: list[dict[str, str | int]] = []
         for comment in result.comments:
-            body = _format_comment_body(comment, bot_name=bot_name)
+            body = _format_comment_body(
+                comment,
+                bot_name=bot_name,
+                output_language=result.output_language,
+            )
             rc: dict[str, str | int] = {
                 "path": comment.path,
                 "body": body,
@@ -437,9 +442,14 @@ class GitHubProvider(BaseProvider):
 
         review_body = ""
         if result.summary:
-            review_body = f"**Mira Review Summary**\n\n{result.summary}"
+            summary_label = (
+                "خلاصه مرور Mira"
+                if is_persian(result.output_language)
+                else "Mira Review Summary"
+            )
+            review_body = f"**{summary_label}**\n\n{result.summary}"
         if result.key_issues:
-            review_body += _format_key_issues(result.key_issues)
+            review_body += _format_key_issues(result.key_issues, result.output_language)
 
         @_retry_transient
         def _post() -> list[int]:

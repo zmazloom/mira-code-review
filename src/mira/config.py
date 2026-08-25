@@ -5,12 +5,13 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 from mira.exceptions import ConfigError
 
@@ -164,6 +165,9 @@ class OverlapConfig(BaseModel):
 
 
 class ReviewConfig(BaseModel):
+    # Language for user-facing review prose and render-time labels. English is
+    # the default to preserve existing output when this option is omitted.
+    output_language: str = "en"
     context_lines: int = Field(default=3, ge=0)
     # Total diff size cap. Above this, the diff is *not* truncated arbitrarily —
     # files are ranked by priority and the lowest-priority files are skipped
@@ -184,6 +188,53 @@ class ReviewConfig(BaseModel):
     code_context: bool = True
     context_token_budget: int = 8_000
     max_concurrent_chunks: int = Field(default=5, ge=1, le=20)
+
+    # Trusted, installation-local company review policy. Relative paths are
+    # resolved against the YAML file that supplied the corresponding setting,
+    # never against a pull request branch fetched from a provider.
+    rules_file: str | None = None
+    rules_files: list[str] = Field(default_factory=list)
+    rules_max_file_size: int = Field(default=256_000, ge=1)
+
+    # Populated by load_config(). Kept private so resolved local paths are not
+    # serialized, logged, or forwarded to an LLM.
+    _rules_base_dirs: dict[str, Path] = PrivateAttr(default_factory=dict)
+
+    @field_validator("output_language")
+    @classmethod
+    def _validate_output_language(cls, value: str) -> str:
+        """Accept a safe BCP-47-style language code and normalize its casing."""
+        normalized = value.strip().replace("_", "-").lower()
+        if not re.fullmatch(r"[a-z]{2,8}(?:-[a-z0-9]{1,8})*", normalized):
+            raise ValueError("review.output_language must be a valid language code")
+        return normalized
+
+    @property
+    def prompt_output_language(self) -> str | None:
+        """Return the language only when it was explicitly configured.
+
+        Keeping the implicit default as ``None`` lets prompt builders preserve
+        Mira's historical English prompts byte-for-byte when the setting is
+        omitted, while an explicit ``output_language: en`` is still enforced.
+        """
+        if "output_language" not in self.model_fields_set:
+            return None
+        return self.output_language
+
+    @field_validator("rules_file")
+    @classmethod
+    def _validate_rules_file(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("review.rules_file must not be empty")
+        return value
+
+    @field_validator("rules_files")
+    @classmethod
+    def _validate_rules_files(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("review.rules_files entries must not be empty")
+        return value
+
     # Review each chunk N times and keep only majority-vote findings.
     # 1 = off (single pass, exact current behavior). 3 is the sweet spot:
     # variance FPs flicker across runs, real findings recur. Runs fire in
@@ -312,6 +363,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 _global_defaults: dict[str, Any] = {}
+_global_defaults_dir: Path | None = None
 
 
 def set_global_defaults(config_path: Path | str) -> MiraConfig:
@@ -320,11 +372,12 @@ def set_global_defaults(config_path: Path | str) -> MiraConfig:
     Subsequent `load_config()` calls deep-merge per-repo `.mira.yaml` (and
     env-var fallbacks) over these defaults.
     """
-    global _global_defaults
+    global _global_defaults, _global_defaults_dir
     path = Path(config_path)
     if not path.is_file():
         raise ConfigError(f"Config file not found: {path}")
     _global_defaults = _load_yaml(path)
+    _global_defaults_dir = path.resolve().parent
     # Validate eagerly so a malformed file fails server boot, not first review.
     return load_config()
 
@@ -338,6 +391,20 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
         else:
             out[key] = value
     return out
+
+
+def _record_rules_origins(
+    layer: dict[str, Any],
+    origin: Path,
+    origins: dict[str, Path],
+) -> None:
+    """Track which config layer supplied each path-bearing review field."""
+    review = layer.get("review")
+    if not isinstance(review, dict):
+        return
+    for field in ("rules_file", "rules_files"):
+        if field in review:
+            origins[field] = origin
 
 
 def load_config(
@@ -358,6 +425,9 @@ def load_config(
       6. `DATABASE_URL` / `MIRA_MODEL` env-var fallbacks.
     """
     data: dict[str, Any] = _deep_merge({}, _global_defaults)
+    rules_origins: dict[str, Path] = {}
+    if _global_defaults and _global_defaults_dir is not None:
+        _record_rules_origins(_global_defaults, _global_defaults_dir, rules_origins)
 
     # Lazy import + broad except: this function runs in CLI / test contexts
     # that have no DB attached. A DB error must never block a review.
@@ -368,6 +438,7 @@ def load_config(
             db_overrides = _app_db.get_global_review_overrides()
             if db_overrides:
                 data = _deep_merge(data, db_overrides)
+                _record_rules_origins(db_overrides, Path.cwd(), rules_origins)
     except Exception as _db_exc:  # noqa: BLE001
         logger.debug("load_config: skipping DB overrides (%s)", _db_exc)
 
@@ -375,15 +446,21 @@ def load_config(
         path = Path(config_path)
         if not path.is_file():
             raise ConfigError(f"Config file not found: {path}")
-        data = _deep_merge(data, _load_yaml(path))
+        file_data = _load_yaml(path)
+        data = _deep_merge(data, file_data)
+        _record_rules_origins(file_data, path.resolve().parent, rules_origins)
     else:
         found = find_config_file()
         if found:
-            data = _deep_merge(data, _load_yaml(found))
+            file_data = _load_yaml(found)
+            data = _deep_merge(data, file_data)
+            _record_rules_origins(file_data, found.resolve().parent, rules_origins)
 
     if overrides:
         for key, value in overrides.items():
             _set_nested(data, key.split("."), value)
+            if key in {"review.rules_file", "review.rules_files"}:
+                rules_origins[key.removeprefix("review.")] = Path.cwd()
 
     # Respect DATABASE_URL env var
     env_db_url = os.environ.get("DATABASE_URL")
@@ -400,7 +477,9 @@ def load_config(
         data.setdefault("llm", {})["model"] = env_model
 
     try:
-        return MiraConfig.model_validate(data)
+        config = MiraConfig.model_validate(data)
+        config.review._rules_base_dirs = rules_origins
+        return config
     except Exception as e:
         raise ConfigError(f"Invalid configuration: {e}") from e
 
