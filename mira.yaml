@@ -2,7 +2,12 @@ llm:
   base_url: "https://aifa-chatbot.sandpod.ir/v1"
   api_key_env: "COMPANY_LLM_API_KEY"
   model: "assistance-model"
+  temperature: 0
 
 review:
   rules_file: "./company-rules.md"
   output_language: "fa"
+
+filter:
+  confidence_threshold: 0.7
+  max_comments: 20
