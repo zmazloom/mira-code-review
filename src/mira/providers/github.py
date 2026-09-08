@@ -443,7 +443,7 @@ class GitHubProvider(BaseProvider):
         review_body = ""
         if result.summary:
             summary_label = (
-                "خلاصه مرور Mira"
+                "خلاصه مرور توسط AI"
                 if is_persian(result.output_language)
                 else "Mira Review Summary"
             )

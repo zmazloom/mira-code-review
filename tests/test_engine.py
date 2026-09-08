@@ -466,7 +466,7 @@ class TestReviewEngine:
         )
         _clamp_confidence_to_findings(wt, [self._comment(Severity.BLOCKER)])
         assert wt.confidence_score.score == 2
-        assert wt.confidence_score.label == "Do not merge"
+        assert wt.confidence_score.label == "مرج نکن"
         assert "1 blocker" in wt.confidence_score.reason
 
     def test_clamp_many_warnings_forces_score_three(self):
@@ -482,7 +482,7 @@ class TestReviewEngine:
             [self._comment(Severity.WARNING) for _ in range(3)],
         )
         assert wt.confidence_score.score == 3
-        assert wt.confidence_score.label == "Needs review"
+        assert wt.confidence_score.label == "نیاز به بررسی"
 
     def test_clamp_does_not_raise_score(self):
         wt = WalkthroughResult(
@@ -495,7 +495,7 @@ class TestReviewEngine:
         _clamp_confidence_to_findings(wt, [])
         # No findings and LLM already scored low → leave as-is.
         assert wt.confidence_score.score == 1
-        assert wt.confidence_score.label == "Major concerns"
+        assert wt.confidence_score.label == "نگرانی کم"
 
     def test_clamp_blocker_beats_warnings(self):
         wt = WalkthroughResult(

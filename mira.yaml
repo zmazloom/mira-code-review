@@ -7,6 +7,7 @@ llm:
 review:
   rules_file: "./company-rules.md"
   output_language: "fa"
+  focus_only_on_problems: false
 
 filter:
   confidence_threshold: 0.7

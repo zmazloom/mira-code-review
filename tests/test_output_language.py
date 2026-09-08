@@ -337,7 +337,7 @@ async def test_github_comment_localization() -> None:
     body = payload["comments"][0]["body"]
     assert "**اشکال**" in body
     assert "⚠️ هشدار" in body
-    assert "**خلاصه مرور Mira**" in payload["body"]
+    assert "**خلاصه مرور توسط AI**" in payload["body"]
     assert "createFood" in body
 
 
@@ -357,5 +357,5 @@ async def test_gitlab_comment_localization() -> None:
         for call in provider._request.await_args_list
     ]
     assert any("**اشکال**" in body and "⚠️ هشدار" in body for body in bodies)
-    assert any("**خلاصه مرور Mira**" in body for body in bodies)
+    assert any("**خلاصه مرور توسط AI**" in body for body in bodies)
     assert any("FoodController" in body and "createFood" in body for body in bodies)

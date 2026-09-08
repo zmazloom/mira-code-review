@@ -109,14 +109,14 @@ def _clamp_confidence_to_findings(
 
     if blockers > 0 and cs.score > 2:
         cs.score = 2
-        cs.label = "Do not merge"
+        cs.label = "مرج نکن"
         cs.reason = (
             f"Found {blockers} blocker{'s' if blockers != 1 else ''} "
             "that must be fixed before merge."
         )
     elif warnings >= 3 and cs.score > 3:
         cs.score = 3
-        cs.label = "Needs review"
+        cs.label = "نیاز به بررسی"
         cs.reason = f"Found {warnings} warnings that need attention before merge."
 
     if cs.score != original:
@@ -416,7 +416,7 @@ class ReviewEngine:
             return None
         if is_persian(self.config.review.output_language):
             placeholder = (
-                f"{WALKTHROUGH_MARKER}\n## مرور تغییرات PR توسط Mira\n\n"
+                f"{WALKTHROUGH_MARKER}\n## مرور تغییرات PR توسط AI\n\n"
                 "*🔍 در حال بررسی این PR…*\n"
             )
         else:
@@ -744,7 +744,7 @@ class ReviewEngine:
                         if is_persian(self.config.review.output_language):
                             failure_body = (
                                 f"{WALKTHROUGH_MARKER}\n"
-                                "## مرور تغییرات PR توسط Mira\n\n"
+                                "## مرور تغییرات PR توسط AI\n\n"
                                 "---\n\n"
                                 "<details>\n"
                                 "<summary><b>❌ بررسی ناموفق بود</b> — برای جزئیات کلیک کنید</summary>\n\n"
@@ -892,7 +892,7 @@ class ReviewEngine:
             reason = result.skipped_reason or result.summary or (
                 "مرور تغییرات تولید نشد." if fa else "Walkthrough was not generated."
             )
-            heading = "## مرور تغییرات PR توسط Mira" if fa else "## Mira PR Walkthrough"
+            heading = "## مرور تغییرات AI توسط AI" if fa else "## AI PR Walkthrough"
             markdown = f"{WALKTHROUGH_MARKER}\n{heading}\n\n*{reason}*\n"
             try:
                 await self.provider.update_comment(pr_info, placeholder_id, markdown)

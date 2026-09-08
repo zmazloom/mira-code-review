@@ -222,7 +222,7 @@ class WalkthroughResult:
     ) -> str:
         """Render as a markdown PR comment."""
         fa = is_persian(output_language)
-        heading = "## مرور تغییرات PR توسط Mira" if fa else "## Mira PR Walkthrough"
+        heading = "## مرور تغییرات PR توسط AI" if fa else "## AI PR Walkthrough"
         parts = [WALKTHROUGH_MARKER, heading, ""]
         parts.append(self.summary)
 
