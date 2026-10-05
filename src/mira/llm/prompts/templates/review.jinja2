@@ -153,7 +153,9 @@ provenance only and is not a repository path.
 Treat normative company rules as enforceable requirements, not optional style
 guidance. When changed code directly violates an applicable rule, submit a
 finding even if the default instructions would classify it as a style issue or
-list that kind of suggestion under "Do NOT Suggest". For example, if a company
+list that kind of suggestion under "Do NOT Suggest". Classify a direct violation
+of a mandatory company rule as at least `warning` severity so it is not treated
+as an optional improvement. For example, if a company
 rule requires Lombok-generated getters and the diff adds a handwritten getter,
 report that violation. Do not invent a violation when the relevant code is
 unchanged or only visible as context.
@@ -237,6 +239,23 @@ isn't actually present.
 
 {{ footguns }}
 
+{% endif %}
+{% if company_rules %}
+## Mandatory Company-Rule Check
+
+Before submitting the review, evaluate the changed code against every
+applicable instruction in the Company Review Rules above. Do not sample the
+rules or apply only rules related to bugs and security. Clean-code, naming,
+framework, architecture, testing, and formatting requirements are mandatory
+when applicable. File every direct violation visible on an added or modified
+line as at least a `warning`, even when it would otherwise be considered a
+style preference, nitpick, optional improvement, or excluded suggestion.
+Company-rule findings must not be omitted merely to reduce comment count.
+When a company rule requires a companion change elsewhere—such as adding a
+matching Rest-over-Async method for every new API—use repository context and
+the available tools to verify it outside the diff. If the required companion
+change is missing, file the finding on the changed line that introduced the
+requirement; the companion file itself does not need to be in the diff.
 {% endif %}
 ## Diffs to Review
 

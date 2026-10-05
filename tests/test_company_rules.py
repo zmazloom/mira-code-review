@@ -13,7 +13,11 @@ from mira.config import MiraConfig, ReviewConfig, load_config, set_global_defaul
 from mira.core.company_rules import load_company_rules
 from mira.core.passes import self_critique
 from mira.exceptions import ConfigError
-from mira.llm.prompts.review import build_review_prompt
+from mira.llm.prompts.review import (
+    build_company_review_prompt,
+    build_review_prompt,
+    partition_company_rules,
+)
 from mira.models import FileChangeType, FileDiff, HunkInfo, ReviewComment, Severity
 
 
@@ -154,6 +158,35 @@ class TestCompanyRuleLoading:
 
 
 class TestCompanyRulePrompts:
+    def test_long_company_policy_is_partitioned_on_sections(self):
+        policy = {
+            "content": "# Policy\n\nIntro\n\n## General\n" + "A" * 40 + "\n\n## Rest Async\nRULE",
+            "source": "company.md",
+        }
+
+        parts = partition_company_rules([policy], max_chars=50)
+
+        assert len(parts) == 3
+        assert "## Rest Async" in parts[-1][0]["content"]
+        assert "RULE" in parts[-1][0]["content"]
+
+    def test_dedicated_company_prompt_checks_every_rule_and_cross_file_requirement(self):
+        company = [{"content": "EVERY COMPANY RULE", "source": "company.md"}]
+
+        messages = build_company_review_prompt(
+            [_diff_file()],
+            MiraConfig(),
+            company,
+            pr_title="Add API",
+        )
+
+        prompt = messages[0]["content"]
+        assert "mandatory company-policy reviewer" in prompt
+        assert "EVERY applicable rule" in prompt
+        assert "Rest-over-Async" in prompt
+        assert "grep_repo" in prompt
+        assert "EVERY COMPANY RULE" in prompt
+
     def test_main_prompt_is_additive_and_company_policy_is_first(self):
         company = [
             {
@@ -185,6 +218,15 @@ class TestCompanyRulePrompts:
         assert all(item in prompt for item in ordered)
         assert [prompt.index(item) for item in ordered] == sorted(prompt.index(i) for i in ordered)
         assert "Source: company.md" in prompt
+        assert "normative company rules as enforceable requirements" in prompt
+        assert "requires Lombok-generated getters" in prompt
+        assert "at least `warning` severity" in prompt
+        assert "directly violate an applicable company rule" in prompt
+        assert "evaluate the changed code against every" in prompt
+        assert "Do not sample the" in prompt
+        assert "Company-rule findings must not be omitted" in prompt
+        assert "matching Rest-over-Async method for every new API" in prompt
+        assert "the companion file itself does not need to be in the diff" in prompt
 
     @pytest.mark.asyncio
     async def test_self_critique_receives_company_and_other_rules(self):
@@ -215,5 +257,7 @@ class TestCompanyRulePrompts:
         prompt = critic.complete_with_tools.await_args.kwargs["messages"][0]["content"]
         assert kept == [comment]
         assert "Company review rules (highest priority)" in prompt
+        assert "grade it `proven` when the violation is visible in the diff" in prompt
+        assert "Company rules have priority over every other grading instruction" in prompt
         assert prompt.index("COMPANY POLICY") < prompt.index("REPOSITORY CUSTOM")
         assert prompt.index("REPOSITORY CUSTOM") < prompt.index("LEARNED PREFERENCE")

@@ -15,6 +15,7 @@ from mira.localization import append_language_instruction
 from mira.models import FileDiff, UnresolvedThread
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
+_COMPANY_PASS_MAX_CHARS = 6000
 
 
 def _get_template_env() -> Environment:
@@ -113,6 +114,93 @@ def build_review_prompt(
         {"role": "system", "content": system_content},
         {"role": "user", "content": "\n\n".join(user_parts)},
     ]
+
+
+def build_company_review_prompt(
+    files: list[FileDiff],
+    config: MiraConfig,
+    company_rules: list[dict[str, str]],
+    pr_title: str = "",
+    pr_description: str = "",
+    code_context: str = "",
+) -> list[dict[str, str]]:
+    """Build a dedicated pass that checks every company rule.
+
+    Keeping this pass separate from the broad quality review prevents a long
+    installation policy from being diluted by generic review instructions.
+    """
+    file_paths = [f.path for f in files]
+    rules = "\n\n".join(
+        f"### Source: {rule.get('source', 'company rules')}\n{rule.get('content', '')}"
+        for rule in company_rules
+    )
+    system_content = f"""You are Mira's mandatory company-policy reviewer.
+
+Your only task is to check the changed code against EVERY applicable rule in
+the company policy below. Evaluate the rules one by one; do not sample them,
+summarize them, or focus only on bugs and security. Report every confirmed
+violation, including naming, clean-code, framework, architecture, testing,
+formatting, and required companion changes in other files.
+
+If a rule requires a corresponding change outside the diff, use `grep_repo`
+and `read_file` to locate and verify it. In particular, for every new API or
+endpoint, verify that its corresponding Rest-over-Async class contains the
+required async-call method. If it is missing, anchor the finding to the added
+endpoint line. An unchanged companion file is not a reason to omit a finding.
+
+Every company-policy violation is at least `warning` severity and should use
+confidence >= {config.filter.confidence_threshold}. Do not suppress findings
+as style preferences, optional improvements, or because of comment limits.
+Only cite exact added or modified code in `existing_code`.
+
+Valid comment paths:
+{chr(10).join(f'- `{path}`' for path in file_paths)}
+
+Pull request title: {pr_title}
+Pull request description: {pr_description}
+
+## Mandatory Company Policy
+
+{rules}
+"""
+    system_content = append_language_instruction(
+        system_content, config.review.prompt_output_language
+    )
+    user_parts = [code_context] if code_context else []
+    user_parts.extend(build_file_context_string(f) for f in files)
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": "\n\n".join(user_parts)},
+    ]
+
+
+def partition_company_rules(
+    company_rules: list[dict[str, str]],
+    max_chars: int = _COMPANY_PASS_MAX_CHARS,
+) -> list[list[dict[str, str]]]:
+    """Split long policy documents on Markdown sections for focused passes."""
+    sections: list[dict[str, str]] = []
+    for rule in company_rules:
+        content = rule.get("content", "")
+        parts = [part.strip() for part in re.split(r"(?=^##\s+)", content, flags=re.MULTILINE)]
+        parts = [part for part in parts if part]
+        for part in parts or [content]:
+            sections.append({**rule, "content": part})
+
+    partitions: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+    current_size = 0
+    for section in sections:
+        size = len(section.get("content", ""))
+        if current and current_size + size > max_chars:
+            partitions.append(current)
+            current = []
+            current_size = 0
+        current.append(section)
+        current_size += size
+    if current:
+        partitions.append(current)
+    return partitions
 
 
 def build_security_review_prompt(

@@ -19,9 +19,8 @@
 
 ## 2. Lombok، DTO و Mapper
 
-- Getter، Setter، Constructor و Builder تکراری را دستی ننویس؛ از Lombok استفاده کن.
-- روی Entity، Setter عمومی قرار نده.
-- روی Entity از `@Data` استفاده نکن.
+- برای getterهای ساده حتماً از Lombok `@Getter` استفاده کن و getter را دستی ننویس. Setter، Constructor و Builder تکراری را نیز دستی ننویس و از Lombok استفاده کن.
+- روی Entity از `@Data` استفاده نکن اما انوتیشن های دیگر قابل استفاده اند.
 - برای DTO خروجی ترجیحاً از `record` استفاده کن؛ در غیر این صورت آن را immutable نگه دار.
 - برای سازنده‌هایی با پارامترهای زیاد از Builder استفاده کن.
 - تبدیل بین Entity و DTO را با MapStruct انجام بده.
@@ -242,5 +241,5 @@
 
 
 ## 16. Notise Project
-حتما برای هر api جدیدی که مینویسی در کلاس های rest over async متدی برای فراخوانی از سمت ایسینک تعریف کن.
-برای هر entity جدید که تعریف میکنی حتما برای فیلد id نام و اطلاعات sequence generator را تعریف کن.
+- برای هر API یا endpoint جدید که در controller ها تعریف می شود، وجود متد متناظر برای فراخوانی آن را در کلاس Rest-over-Async-xx-handler مربوطه الزامی بررسی کن. اگر این متد در همان Pull Request اضافه نشده است، حتی اگر کلاس Rest-over-Async خارج از diff باشد، آن را به‌عنوان نقض قانون شرکت با شدت حداقل `warning` گزارش کن و کامنت را روی خط endpoint جدید قرار بده.
+- برای هر entity جدید که تعریف میکنی حتما برای فیلد id نام و اطلاعات sequence generator را تعریف کن.

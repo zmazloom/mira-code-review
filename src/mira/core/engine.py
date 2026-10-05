@@ -34,8 +34,10 @@ from mira.index.context import build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
 from mira.llm.prompts.review import (
+    build_company_review_prompt,
     build_review_prompt,
     build_walkthrough_prompt,
+    partition_company_rules,
 )
 from mira.llm.response_parser import (
     convert_to_review_comments,
@@ -1369,7 +1371,9 @@ class ReviewEngine:
                         pr_description=pr_description,
                         existing_comments=base_existing or None,
                         code_context=code_context_block,
-                        company_rules=company_rules or None,
+                        # Company rules run in focused policy passes below.
+                        # Supplying them here as well creates duplicate findings.
+                        company_rules=None,
                         learned_rules=learned_rules or None,
                         custom_rules=custom_rules or None,
                         file_history=chunk_history or None,
@@ -1415,6 +1419,67 @@ class ReviewEngine:
                     if not raw_response:
                         raw_response = await self.llm.review(messages)
                     comments, key_issues, summary_text = _parse(raw_response)
+
+                    # Company policy gets a dedicated pass. Large policy files
+                    # are otherwise easy for a general-purpose review to
+                    # underweight, especially for cross-file companion rules.
+                    if company_rules:
+                        company_comments: list[ReviewComment] = []
+                        company_key_issues: list[KeyIssue] = []
+                        policy_parts = partition_company_rules(company_rules)
+                        for part_idx, policy_part in enumerate(policy_parts):
+                            company_messages = build_company_review_prompt(
+                                files=chunk.files,
+                                config=self.config,
+                                company_rules=policy_part,
+                                pr_title=pr_title,
+                                pr_description=pr_description,
+                                code_context=code_context_block,
+                            )
+                            company_raw = ""
+                            if use_agentic:
+                                company_executor = AgenticToolExecutor(
+                                    source_fetcher=self._agentic_source_fetcher,  # type: ignore[arg-type]
+                                    repo_tree=list(self._agentic_repo_tree),
+                                )
+                                company_raw = await agentic_review_loop(
+                                    self.llm,
+                                    company_messages,
+                                    company_executor,
+                                    output_language=self.config.review.prompt_output_language,
+                                )
+                                audit.append(
+                                    {
+                                        "stage": "company_agentic",
+                                        "chunk": idx,
+                                        "part": part_idx,
+                                        "calls": company_executor.call_log,
+                                    }
+                                )
+                            if not company_raw:
+                                company_raw = await self.llm.review(company_messages)
+                            part_comments, part_key_issues, _ = _parse(company_raw)
+                            company_comments.extend(part_comments)
+                            company_key_issues.extend(part_key_issues)
+
+                        for comment in company_comments:
+                            comment.source_pass = "company"
+                            if comment.severity < Severity.WARNING:
+                                comment.severity = Severity.WARNING
+                            comment.confidence = max(
+                                comment.confidence,
+                                self.config.filter.confidence_threshold,
+                            )
+                        comments.extend(company_comments)
+                        key_issues.extend(company_key_issues)
+                        audit.append(
+                            {
+                                "stage": "company_policy",
+                                "chunk": idx,
+                                "parts": len(policy_parts),
+                                "count": len(company_comments),
+                            }
+                        )
 
                     # Ensemble: fire the extra runs in parallel and keep
                     # majority-vote findings. The agentic loop (if any) only
@@ -1558,7 +1623,10 @@ class ReviewEngine:
         audit.append({"stage": "drafted", "chunk": "osv", "count": len(osv_comments)})
         all_comments.extend(osv_comments)
 
-        all_comments = [classify_severity(c) for c in all_comments]
+        all_comments = [
+            c if c.source_pass == "company" else classify_severity(c)
+            for c in all_comments
+        ]
 
         final_comments = filter_noise(
             all_comments,
@@ -1591,9 +1659,11 @@ class ReviewEngine:
             _selected = {f.path for f in filtered}
             critique_files = filtered + [f for f in manifest_candidates if f.path not in _selected]
             try:
-                final_comments = await self_critique(
+                company_comments = [c for c in final_comments if c.source_pass == "company"]
+                other_comments = [c for c in final_comments if c.source_pass != "company"]
+                critiqued_comments = await self_critique(
                     self.llm,
-                    final_comments,
+                    other_comments,
                     company_rules=company_rules or None,
                     learned_rules=learned_rules or None,
                     custom_rules=custom_rules or None,
@@ -1602,6 +1672,7 @@ class ReviewEngine:
                     audit=audit,
                     output_language=self.config.review.prompt_output_language,
                 )
+                final_comments = company_comments + critiqued_comments
             except Exception as exc:
                 logger.warning("Self-critique pass failed, keeping original comments: %s", exc)
 
