@@ -238,6 +238,40 @@ mira review https://github.com/org/repo/pull/123 --config ./mira.yaml
 
 ## Development
 
+### Run the frontend and backend with Docker Compose
+
+The root `Dockerfile` builds the React frontend and bundles it with the Python
+backend. Both are served at http://localhost:8000 from one container.
+The frontend uses `npm ci`; the backend uses the committed `uv.lock` with
+`uv sync --frozen` to install recorded dependency versions and verify hashes.
+Backend downloads allow a 60-second timeout and retries for slow connections.
+
+1. Copy `docker.env.example` to `.env` (PowerShell: `Copy-Item docker.env.example .env`).
+2. For GitHub, create a `secrets` directory and put your GitHub App private key
+   at `secrets/private-key.pem`. For GitLab, use the alternative variables in
+   the example instead. Credentials are optional for opening the dashboard;
+   uncomment and fill in the example variables to enable reviews, then run
+   `docker compose up -d --force-recreate` to apply them.
+3. Build and start:
+
+```bash
+docker compose up --build -d
+docker compose logs -f mira
+```
+
+Open http://localhost:8000. If you did not set `ADMIN_PASSWORD`, retrieve the
+generated password with:
+
+```bash
+docker compose exec mira cat /app/data/indexes/initial_admin_password
+```
+
+The named `mira-data` volume preserves the SQLite database and indexes across
+container restarts. `docker compose down` stops the app and retains the data;
+adding `--volumes` deletes it. The private key is mounted read-only and excluded
+from the image. GitHub webhooks need a publicly reachable URL pointing to
+`/github/webhook` on this server.
+
 ```bash
 git clone https://github.com/miracodeai/mira.git
 cd mira

@@ -27,6 +27,7 @@ ui/mira/.vite/
 
 # Local state — never bake into image
 data/
+secrets/
 *.pem
 *.key
 .env

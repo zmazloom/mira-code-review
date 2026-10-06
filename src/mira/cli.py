@@ -415,6 +415,11 @@ def review(
 @click.option("--host", default="0.0.0.0", help="Host to bind to")
 @click.option("--port", envvar="PORT", default=8000, type=int, help="Port to bind to")
 @click.option(
+    "--allow-unconfigured",
+    is_flag=True,
+    help="Start the dashboard even when no code-hosting platform is configured.",
+)
+@click.option(
     "--app-id",
     envvar="MIRA_GITHUB_APP_ID",
     default=None,
@@ -489,6 +494,7 @@ def review(
 def serve(
     host: str,
     port: int,
+    allow_unconfigured: bool,
     app_id: str | None,
     private_key: str | None,
     webhook_secret: str | None,
@@ -534,7 +540,7 @@ def serve(
     github_configured = bool(app_id and private_key and webhook_secret)
     gitlab_configured = bool(gitlab_token and gitlab_webhook_secret)
     forgejo_configured = bool(forgejo_token and forgejo_webhook_secret)
-    if not github_configured and not gitlab_configured and not forgejo_configured:
+    if not github_configured and not gitlab_configured and not forgejo_configured and not allow_unconfigured:
         raise click.ClickException(
             "No platform configured. Provide GitHub App creds (--app-id, --private-key, "
             "--webhook-secret) and/or GitLab creds (--gitlab-token, --gitlab-webhook-secret)."
@@ -603,7 +609,10 @@ def serve(
         ]
         if on
     )
-    click.echo(f"Starting Mira webhook server ({platforms}) on {host}:{port}")
+    if platforms:
+        click.echo(f"Starting Mira webhook server ({platforms}) on {host}:{port}")
+    else:
+        click.echo(f"Starting Mira dashboard on {host}:{port}; configure a platform to enable reviews.")
     uvicorn.run(app, host=host, port=port)
 
 
