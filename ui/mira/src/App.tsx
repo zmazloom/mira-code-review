@@ -14,6 +14,7 @@ import { DashboardPage } from "@/pages/dashboard"
 import { LearnedRulesPage } from "@/pages/learned-rules"
 import { LearningFormPage } from "@/pages/learning-form"
 import { LoginPage } from "@/pages/login"
+import { ManualReviewPage } from "@/pages/manual-review"
 import { PackagesPage } from "@/pages/packages"
 import { RepoDetailPage } from "@/pages/repo-detail"
 import { RelationshipsPage } from "@/pages/relationships"
@@ -202,6 +203,7 @@ export function App() {
         >
           <Route index element={<DashboardPage />} />
           <Route path="activity" element={<ActivityPage />} />
+          <Route path="manual-review" element={<ManualReviewPage />} />
           <Route path="repos" element={<ReposPage />} />
           <Route path="repos/:owner/:repo" element={<RepoDetailPage />} />
           <Route path="contributors" element={<ContributorsPage />} />

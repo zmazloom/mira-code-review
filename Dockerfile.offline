@@ -1,0 +1,17 @@
+# Recovery build for machines unable to download Python dependencies.
+# First tag a previously working image as mira-dependencies:local.
+FROM node:24-slim AS ui-builder
+WORKDIR /ui
+COPY ui/mira/package.json ui/mira/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY ui/mira/ ./
+RUN npm run build
+
+FROM mira-dependencies:local
+WORKDIR /app
+RUN cp /app/uv.lock /tmp/dependency-uv.lock && cp /app/pyproject.toml /tmp/dependency-pyproject.toml
+COPY . /app
+# Reuse installed dependencies only when both manifests are identical.
+RUN cmp /app/uv.lock /tmp/dependency-uv.lock && cmp /app/pyproject.toml /tmp/dependency-pyproject.toml
+COPY --from=ui-builder /ui/dist /app/ui_dist
+ENTRYPOINT ["mira", "serve"]

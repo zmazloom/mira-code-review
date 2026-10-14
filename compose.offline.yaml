@@ -1,0 +1,5 @@
+# Explicit fallback using dependencies from a previously working local image.
+services:
+  mira:
+    build:
+      dockerfile: Dockerfile.offline

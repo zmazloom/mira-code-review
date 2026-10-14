@@ -193,18 +193,26 @@ class ManualReviewCommand:
         post: bool = False,
         post_inline_comments: bool = True,
         bot_name: str = "miracodeai",
+        model_override: str | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
         self.post = post
         self.post_inline_comments = post_inline_comments
         self.bot_name = bot_name
+        self.model_override = model_override
 
     async def execute(self, reference: PullRequestReference) -> ManualReviewOutcome:
         """Construct configured LLMs and delegate the full review to ``ReviewEngine``."""
-        llm = create_llm(llm_config_for("review", self.config.llm))
-        indexing_llm = create_llm(llm_config_for("indexing", self.config.llm))
-        security_llm = create_llm(llm_config_for("security", self.config.llm))
+        def model_config(purpose: str):
+            config = llm_config_for(purpose, self.config.llm)
+            if self.model_override:
+                config = config.model_copy(update={"model": self.model_override})
+            return config
+
+        llm = create_llm(model_config("review"))
+        indexing_llm = create_llm(model_config("indexing"))
+        security_llm = create_llm(model_config("security"))
         engine = ReviewEngine(
             config=self.config,
             llm=llm,
@@ -227,3 +235,15 @@ class ManualReviewCommand:
             posted=self.post,
             inline_posted=self.post and self.post_inline_comments,
         )
+
+
+class NotifReviewCommand(ManualReviewCommand):
+    """Check the request title before creating LLMs or running a review."""
+
+    async def execute_if_matching(
+        self, reference: PullRequestReference,
+    ) -> ManualReviewOutcome | None:
+        pr_info = await self.provider.get_pr_info(reference.url)
+        if not pr_info.title.casefold().startswith("notif mr"):
+            return None
+        return await self.execute(reference)

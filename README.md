@@ -272,6 +272,42 @@ adding `--volumes` deletes it. The private key is mounted read-only and excluded
 from the image. GitHub webhooks need a publicly reachable URL pointing to
 `/github/webhook` on this server.
 
+The dashboard's **Start review** page accepts a GitHub pull request or GitLab
+merge request link and runs `mira review-notif <url>` in the background. This
+command fetches the request title first. Only titles beginning with `Notif MR`
+(case-insensitive) are reviewed and posted. Other titles return **Skipped**
+without running the review engine, calling an LLM, or posting comments.
+The ordinary `mira review --post` command retains its existing behavior. The page
+includes an **LLM model** picker above Platform, listing configured model IDs
+and models advertised by the configured service. You can also enter a model
+ID directly. The selected model applies to all LLM passes of that manual
+review without changing saved settings. Compose mounts `mira.yaml` and sets
+`MIRA_CONFIG` so the server and review command use its endpoint configuration.
+The page shows **Reviewing…**, then confirms when the review has been posted, or shows
+a failure message. Manual GitHub reviews require `GITHUB_TOKEN` (GitHub App
+credentials alone are insufficient); GitLab reviews use `GITLAB_TOKEN` or
+`MIRA_GITLAB_TOKEN`. Configure these in `.env` and recreate the container.
+For self-managed GitLab, set `MIRA_GITLAB_API_URL` to that server's API URL.
+On Windows, if `GITHUB_TOKEN` is saved in the User or Machine environment,
+run `./scripts/restart-mira.ps1` to reload it and recreate the container.
+An older terminal may not have the saved token when running Compose directly.
+The page resumes status checking after a refresh in the same browser tab.
+Job status is held in server memory, so it is lost when the server restarts;
+check the PR/MR for existing comments before retrying after a restart.
+
+If Python package downloads are unavailable and a working local image already
+exists, you can reuse its installed dependencies:
+
+```powershell
+docker tag mira-code-review_mira:latest mira-dependencies:local
+docker compose -f compose.yaml -f compose.offline.yaml up --build -d
+```
+
+This fallback checks that `uv.lock` and `pyproject.toml` match the dependency
+image before building. The frontend still requires cached npm dependencies or
+network access. Keep the `mira-dependencies:local` tag for subsequent fallback
+builds. Use the normal build once package downloads work again.
+
 ```bash
 git clone https://github.com/miracodeai/mira.git
 cd mira

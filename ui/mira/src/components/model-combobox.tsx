@@ -50,11 +50,15 @@ export function ModelCombobox({
   onChange,
   options,
   configModel,
+  disabled = false,
+  id,
 }: {
   value: string
   onChange: (v: string) => void
   options: ModelOption[]
   configModel?: string
+  disabled?: boolean
+  id?: string
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [open, setOpen] = useState(false)
@@ -94,6 +98,8 @@ export function ModelCombobox({
   return (
     <div className="relative">
       <Input
+        id={id}
+        disabled={disabled}
         ref={inputRef}
         role="combobox"
         aria-expanded={open}

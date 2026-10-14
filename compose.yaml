@@ -10,9 +10,14 @@ services:
       - .env
     environment:
       MIRA_INDEX_DIR: /app/data/indexes
+      MIRA_CONFIG: /app/mira.yaml
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      COMPANY_LLM_API_KEY: ${COMPANY_LLM_API_KEY:-}
     volumes:
       - mira-data:/app/data
       - ./secrets:/run/secrets:ro
+      - ./mira.yaml:/app/mira.yaml:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]

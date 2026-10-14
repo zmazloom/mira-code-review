@@ -387,6 +387,7 @@ def review(
                 provider=provider,
                 post=post,
                 post_inline_comments=not (summary_only or no_inline),
+                model_override=model,
             )
             outcome = asyncio.run(command.execute(reference))
             result = outcome.result
@@ -408,6 +409,51 @@ def review(
 
     # Exit with non-zero if blockers found
     if any(c.severity >= Severity.BLOCKER for c in result.comments):
+        sys.exit(1)
+
+
+@main.command("review-notif")
+@click.argument("url")
+@click.option("--model", envvar="MIRA_MODEL", default=None, help="LLM model to use")
+@click.option("--config", "config_path", envvar="MIRA_CONFIG", default=None)
+@click.option("--token", envvar="MIRA_GIT_TOKEN", default=None)
+@click.option("--github-token", envvar="GITHUB_TOKEN", default=None)
+@click.option("--gitlab-token", envvar="GITLAB_TOKEN", default=None)
+@click.option("--output", "output_format", type=click.Choice(["text", "json"]), default="text")
+def review_notif(
+    url: str, model: str | None, config_path: str | None,
+    token: str | None, github_token: str | None, gitlab_token: str | None,
+    output_format: str,
+) -> None:
+    """Review and post only when the PR/MR title starts with 'Notif MR' (any case)."""
+    from mira.manual_review import NotifReviewCommand
+
+    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    try:
+        reference = parse_pull_request_reference(url)
+        provider = create_manual_provider(
+            reference, token=token, github_token=github_token, gitlab_token=gitlab_token,
+        )
+        config = load_config(config_path)
+        command = NotifReviewCommand(
+            config=config, provider=provider, post=True, model_override=model,
+        )
+        outcome = asyncio.run(command.execute_if_matching(reference))
+    except MiraError as exc:
+        raise click.ClickException(
+            _redact_cli_secrets(exc.safe_message, token, github_token, gitlab_token)
+        ) from exc
+    except Exception as exc:
+        raise click.ClickException(f"Review failed: {type(exc).__name__}") from exc
+
+    if outcome is None:
+        message = "Skipped. The request title must start with 'Notif MR' (case-insensitive)."
+        click.echo(json.dumps({"status": "skipped", "posted": False, "message": message})
+                   if output_format == "json" else message)
+        return
+    outcome.result.output_language = config.review.output_language
+    click.echo(_format_manual_json(outcome) if output_format == "json" else _format_manual_text(outcome))
+    if any(comment.severity >= Severity.BLOCKER for comment in outcome.result.comments):
         sys.exit(1)
 
 

@@ -6,6 +6,7 @@ import {
   ChevronsUpDown,
   Database,
   GitFork,
+  GitPullRequest,
   KeyRound,
   LayoutDashboard,
   LogOut,
@@ -71,6 +72,7 @@ import { UserAvatar } from "@/components/ui/user-avatar"
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/activity", icon: Activity, label: "Activity" },
+  { to: "/manual-review", icon: GitPullRequest, label: "Start review" },
   { to: "/repos", icon: Database, label: "Repositories" },
   { to: "/contributors", icon: Users2, label: "Reviewers", adminOnly: true },
   { to: "/packages", icon: Package, label: "Packages" },
@@ -91,6 +93,7 @@ const settingsSubItems = [
 
 const PAGE_LABELS: Record<string, string> = {
   activity: "Activity",
+  "manual-review": "Start review",
   repos: "Repositories",
   contributors: "Reviewers",
   packages: "Packages",

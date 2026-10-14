@@ -44,6 +44,9 @@ def register_dashboard(app: FastAPI) -> None:
     app.add_middleware(AuthMiddleware, db=_app_db)
     app.include_router(create_auth_router(_app_db))
     app.include_router(router)
+    from mira.dashboard.manual_reviews import router as manual_reviews_router
+
+    app.include_router(manual_reviews_router)
 
 
 # Standalone app — initialized at module load, but routes are registered at
