@@ -197,6 +197,7 @@ class ManualReviewCommand:
         task_prompt: str | None = None,
         task_options=None,
         task_progress=None,
+        add_description: bool = False,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -207,6 +208,7 @@ class ManualReviewCommand:
         self.task_prompt = task_prompt
         self.task_options = task_options
         self.task_progress = task_progress
+        self.add_description = add_description
 
     async def execute(self, reference: PullRequestReference) -> ManualReviewOutcome:
         """Construct configured LLMs and delegate the full review to ``ReviewEngine``."""
@@ -230,6 +232,7 @@ class ManualReviewCommand:
             resolve_threads=self.post_inline_comments,
             indexing_llm=indexing_llm,
             security_llm=security_llm,
+            add_description=self.add_description,
         )
         if self.task_prompt is not None:
             from mira.core.task_review import TaskReviewOptions, TaskReviewSession

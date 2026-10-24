@@ -22,7 +22,6 @@ from urllib.parse import quote
 import httpx
 
 from mira.exceptions import ProviderError
-from mira.localization import is_persian
 from mira.models import (
     BotThreadRecord,
     FileHistoryEntry,
@@ -33,7 +32,7 @@ from mira.models import (
 )
 from mira.platforms import profiles
 from mira.providers.base import BaseProvider
-from mira.providers.formatting import format_comment_body, format_key_issues
+from mira.providers.formatting import format_comment_body
 
 logger = logging.getLogger(__name__)
 
@@ -272,16 +271,6 @@ class ForgejoProvider(BaseProvider):
             return
 
         summary_text = ""
-        if result.summary:
-            summary_label = (
-                "خلاصه مرور توسط AI"
-                if is_persian(result.output_language)
-                else "Mira Review Summary"
-            )
-            summary_text = f"**{summary_label}**\n\n{result.summary}"
-        if result.key_issues:
-            summary_text += format_key_issues(result.key_issues, result.output_language)
-
         review_body = {
             "event": "COMMENT",
             "body": summary_text or None,
@@ -305,11 +294,6 @@ class ForgejoProvider(BaseProvider):
         except ProviderError as exc:
             if getattr(exc, "status_code", None) == 422:
                 logger.warning("Inline review failed (%s); posting as individual comments", exc)
-                if summary_text:
-                    try:
-                        await self.post_comment(pr_info, summary_text)
-                    except ProviderError:
-                        logger.warning("Failed to post PR summary comment (fallback)")
                 for comment in result.comments:
                     body = format_comment_body(
                         comment,

@@ -17,7 +17,6 @@ from urllib.parse import quote
 import httpx
 
 from mira.exceptions import ProviderError
-from mira.localization import is_persian
 from mira.models import (
     BotThreadRecord,
     FileHistoryEntry,
@@ -28,7 +27,7 @@ from mira.models import (
 )
 from mira.platforms import profiles
 from mira.providers.base import BaseProvider
-from mira.providers.formatting import format_comment_body, format_key_issues
+from mira.providers.formatting import format_comment_body
 
 logger = logging.getLogger(__name__)
 
@@ -362,22 +361,6 @@ class GitLabProvider(BaseProvider):
 
         if result.task_review is not None and posted != len(result.comments):
             raise ProviderError("Some task review inline findings could not be published")
-
-        review_body = ""
-        if result.summary:
-            summary_label = (
-                "خلاصه مرور توسط AI"
-                if is_persian(result.output_language)
-                else "Mira Review Summary"
-            )
-            review_body = f"**{summary_label}**\n\n{result.summary}"
-        if result.key_issues:
-            review_body += format_key_issues(result.key_issues, result.output_language)
-        if review_body:
-            try:
-                await self.post_comment(pr_info, review_body)
-            except ProviderError as exc:
-                logger.warning("Failed to post MR summary note: %s", exc)
 
         logger.info("GitLab: posted %d/%d review notes", posted, len(result.comments))
 

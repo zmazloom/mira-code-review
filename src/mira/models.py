@@ -478,6 +478,8 @@ class ReviewResult:
     # Populated only by TASK_AWARE; standard review serialization is unchanged.
     task_review: dict | None = None
     repository_comments: list[ReviewComment] = field(default_factory=list)
+    # Optional short Persian change description requested by the API caller.
+    change_description: str = ""
 
 
 @dataclass

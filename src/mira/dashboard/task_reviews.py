@@ -10,7 +10,7 @@ from dataclasses import asdict
 from typing import cast
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from mira.config import load_config
@@ -160,6 +160,7 @@ async def _run(job: jobs.Job, body: TaskReviewRequest, reference) -> None:
             task_prompt=body.task_prompt,
             task_options=body.review_options,
             task_progress=progress,
+            add_description=job.add_description,
         )
         async with asyncio.timeout(body.review_options.max_seconds):
             outcome = await command.execute(reference)
@@ -186,7 +187,11 @@ async def _run(job: jobs.Job, body: TaskReviewRequest, reference) -> None:
         status.phase = "failed"
         status.message = message
         status.errors = [message]
-        status.publishing_status = "unknown" if body.review_options.post_comments else "disabled"
+        status.publishing_status = (
+            "unknown"
+            if body.review_options.post_comments or job.add_description
+            else "disabled"
+        )
         if command and getattr(command, "task_session", None):
             session = command.task_session
             session.note(message)
@@ -200,7 +205,11 @@ async def _run(job: jobs.Job, body: TaskReviewRequest, reference) -> None:
 
 
 @router.post("", response_model=TaskReviewStatus, status_code=202)
-async def start_task_review(body: TaskReviewRequest, request: Request) -> TaskReviewStatus:
+async def start_task_review(
+    body: TaskReviewRequest,
+    request: Request,
+    add_description: bool = Query(default=False, alias="addDescription"),
+) -> TaskReviewStatus:
     owner = jobs._user_id(request)
     reference = jobs.validate_review_url(body.pr_url)
     if body.model:
@@ -212,9 +221,13 @@ async def start_task_review(body: TaskReviewRequest, request: Request) -> TaskRe
         platform=reference.provider,
         url=body.pr_url.strip(),
         model=body.model,
-        publishing_status="pending" if body.review_options.post_comments else "disabled",
+        publishing_status=(
+            "pending"
+            if body.review_options.post_comments or add_description
+            else "disabled"
+        ),
     )
-    job = jobs.reserve_job(owner, result)
+    job = jobs.reserve_job(owner, result, add_description=add_description)
     try:
         _save(job)
     except Exception:

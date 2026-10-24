@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -9,6 +11,7 @@ from click.testing import CliRunner
 
 from mira.cli import main
 from mira.config import MiraConfig
+from mira.dashboard import manual_reviews as manual_api
 from mira.exceptions import LLMError, ProviderError
 from mira.manual_review import (
     ManualReviewCommand,
@@ -193,6 +196,21 @@ def _invoke_with_fake_command(args: list[str], outcome: ManualReviewOutcome):
     return result, command_cls
 
 
+@pytest.mark.asyncio
+async def test_manual_review_api_passes_adddescription_opt_in(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "fake")
+    monkeypatch.setattr(manual_api, "_run", AsyncMock())
+    manual_api._jobs.clear()
+    manual_api._tasks.clear()
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id=1)))
+    body = manual_api.ReviewRequest(platform="github", url=GITHUB_URL)
+    result = await manual_api.start_review(body, request, add_description=True)
+    assert manual_api._jobs[result.id].add_description
+    await asyncio.sleep(0)
+    manual_api._jobs.clear()
+    manual_api._tasks.clear()
+
+
 class TestManualReviewCLI:
     def test_default_mode_performs_no_remote_writes(self) -> None:
         result, command_cls = _invoke_with_fake_command([], _outcome())
@@ -212,6 +230,29 @@ class TestManualReviewCLI:
         assert result.exit_code == 0
         assert command_cls.call_args.kwargs["post"] is True
         assert command_cls.call_args.kwargs["post_inline_comments"] is True
+
+    def test_notif_api_flag_reaches_review_command(self) -> None:
+        command = MagicMock()
+        command.execute_if_matching = AsyncMock(return_value=_outcome(posted=True))
+        with (
+            patch("mira.cli.load_config", return_value=MiraConfig()),
+            patch("mira.cli.create_manual_provider", return_value=MagicMock()),
+            patch("mira.manual_review.NotifReviewCommand", return_value=command) as command_cls,
+        ):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "review-notif",
+                    GITHUB_URL,
+                    "--github-token",
+                    "tok",
+                    "--add-description",
+                    "--output",
+                    "json",
+                ],
+            )
+        assert result.exit_code == 0
+        assert command_cls.call_args.kwargs["add_description"] is True
 
     @pytest.mark.parametrize("flag", ["--summary-only", "--no-inline"])
     def test_summary_modes_do_not_post_inline_findings(self, flag: str) -> None:

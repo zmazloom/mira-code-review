@@ -15,7 +15,6 @@ from github import Github, GithubException
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from mira.exceptions import ProviderError
-from mira.localization import is_persian
 from mira.models import (
     BotThreadRecord,
     FileHistoryEntry,
@@ -36,9 +35,6 @@ from mira.providers.formatting import (  # noqa: F401
 )
 from mira.providers.formatting import (
     format_comment_body as _format_comment_body,
-)
-from mira.providers.formatting import (
-    format_key_issues as _format_key_issues,
 )
 
 # Transient errors worth retrying — network issues and GitHub server errors.
@@ -463,15 +459,6 @@ class GitHubProvider(BaseProvider):
             review_comments.append(rc)
 
         review_body = ""
-        if result.summary:
-            summary_label = (
-                "خلاصه مرور توسط AI"
-                if is_persian(result.output_language)
-                else "Mira Review Summary"
-            )
-            review_body = f"**{summary_label}**\n\n{result.summary}"
-        if result.key_issues:
-            review_body += _format_key_issues(result.key_issues, result.output_language)
 
         @_retry_transient
         def _post() -> list[int]:
@@ -553,22 +540,6 @@ class GitHubProvider(BaseProvider):
                         )
                     else:
                         raise
-
-            # If every inline failed, post the summary alone so the review still shows up.
-            if posted == 0 and review_body:
-                try:
-                    pr.create_review(
-                        commit=latest_commit,
-                        body=review_body,
-                        event="COMMENT",
-                        comments=[],
-                    )
-                except GithubException as exc:
-                    logger.warning(
-                        "Summary-only fallback also failed (%s): %s",
-                        exc.status,
-                        exc.data,
-                    )
 
             logger.info("Individual fallback: posted %d/%d comments", posted, len(review_comments))
             return ids

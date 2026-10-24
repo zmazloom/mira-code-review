@@ -372,6 +372,63 @@ async def test_separate_findings_publish_individually_without_review_summary(sto
 
 
 @pytest.mark.asyncio
+async def test_change_description_is_published_before_task_findings(storage):
+    p = provider()
+    engine = ReviewEngine(config(), FakeLLM(), p, dry_run=True, add_description=True)
+    session = TaskReviewSession("Implement CRUD", TaskReviewOptions(post_comments=True))
+    session.configure(engine)
+    await session.prepare(engine, info(), DIFF)
+    result = ReviewResult(
+        comments=[
+            ReviewComment(
+                "service.py", 2, None, Severity.WARNING, "bug", "Missing return",
+                "The operation returns no assignment.", 0.95, source_pass="task"
+            )
+        ],
+        change_description="**📝 خلاصه تغییرات**\n\n- عملیات ثبت اضافه شد.",
+        task_review={"mode": "TASK_AWARE"},
+    )
+    await session.publish(engine, result)
+    names = [call[0] for call in p.mock_calls]
+    assert names.index("post_comment") < names.index("post_review")
+    assert p.post_comment.call_args.args[1].startswith("**📝 خلاصه تغییرات**")
+
+
+@pytest.mark.asyncio
+async def test_requested_description_publishes_when_task_findings_are_disabled(storage):
+    p = provider()
+    engine = ReviewEngine(config(), FakeLLM(), p, dry_run=True, add_description=True)
+    session = TaskReviewSession("Implement CRUD", TaskReviewOptions(post_comments=False))
+    session.configure(engine)
+    await session.prepare(engine, info(), DIFF)
+    result = ReviewResult(change_description="**📝 خلاصه تغییرات**\n\n- عملیات ثبت اضافه شد.")
+    assert await session.publish(engine, result) == "posted"
+    p.post_comment.assert_awaited_once_with(session.pr_info, result.change_description)
+    p.post_review.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_optional_change_description_uses_short_persian_bullets():
+    llm = FakeLLM()
+    llm.complete = AsyncMock(
+        return_value="\n".join(
+            [
+                "**📝 خلاصه تغییرات**",
+                "",
+                "- ثبت اختصاص رویداد اضافه شد.",
+                "- ورودی‌ها اعتبارسنجی می‌شوند.",
+                "- جزئیات داخلی و یافته‌ها حذف شدند.",
+            ]
+        )
+    )
+    engine = ReviewEngine(config(), llm, add_description=True)
+    result = await engine._generate_change_description(DIFF)
+    assert result.count("\n- ") == 3
+    assert "**📝 خلاصه تغییرات**" in result
+    assert llm.complete.await_args.kwargs == {"json_mode": False, "max_tokens": 320}
+
+
+@pytest.mark.asyncio
 async def test_same_location_distinct_task_findings_survive_noise_dedup(storage):
     from mira.core.noise_filter import filter_noise
 
@@ -722,6 +779,28 @@ def test_api_auth_async_ownership_and_persistence(api_client):
             "status"
         ]
         == "done"
+    )
+
+
+def test_add_description_query_parameter_is_boolean_and_opt_in(api_client):
+    client, _ = api_client
+    headers = {"x-test-user": "1"}
+    body = {"pr_url": URL, "task_prompt": "Implement CRUD"}
+    assert client.post("/api/reviews/task-aware", json=body, headers=headers).status_code == 202
+    assert not jobs._jobs[next(iter(jobs._jobs))].add_description
+    jobs._jobs.clear()
+
+    response = client.post(
+        "/api/reviews/task-aware?addDescription=true", json=body, headers=headers
+    )
+    assert response.status_code == 202
+    assert jobs._jobs[next(iter(jobs._jobs))].add_description
+    jobs._jobs.clear()
+    assert (
+        client.post(
+            "/api/reviews/task-aware?addDescription=not-a-bool", json=body, headers=headers
+        ).status_code
+        == 422
     )
 
 

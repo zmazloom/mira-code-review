@@ -420,10 +420,11 @@ def review(
 @click.option("--github-token", envvar="GITHUB_TOKEN", default=None)
 @click.option("--gitlab-token", envvar="GITLAB_TOKEN", default=None)
 @click.option("--output", "output_format", type=click.Choice(["text", "json"]), default="text")
+@click.option("--add-description", is_flag=True, help="Post a short Persian change description first.")
 def review_notif(
     url: str, model: str | None, config_path: str | None,
     token: str | None, github_token: str | None, gitlab_token: str | None,
-    output_format: str,
+    output_format: str, add_description: bool,
 ) -> None:
     """Review and post only when the PR/MR title starts with 'Notif MR' (any case)."""
     from mira.manual_review import NotifReviewCommand
@@ -437,6 +438,7 @@ def review_notif(
         config = load_config(config_path)
         command = NotifReviewCommand(
             config=config, provider=provider, post=True, model_override=model,
+            add_description=add_description,
         )
         outcome = asyncio.run(command.execute_if_matching(reference))
     except MiraError as exc:

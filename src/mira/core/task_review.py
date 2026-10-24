@@ -485,6 +485,11 @@ class TaskReviewSession:
             )
         system = append_language_instruction(
             _TRUST + "Assess each supplied requirement against the inspected final source. "
+            "Evaluate functional completeness, behavior, compatibility with existing callers, architecture, "
+            "security, performance, concurrency, resource/error handling, configuration and risk-based tests. "
+            "Trusted company rules are mandatory and have higher priority than generic preferences, focus filters, "
+            "follow-up severity thresholds, comment targets, or comment-count goals. Enforce every directly "
+            "applicable mandatory rule; do not invent violations for unchanged code. "
             "Never infer missing functionality from missing context or search misses. "
             "Use unverified whenever evidence is insufficient. Missing requires positive evidence "
             "of an incomplete implementation at the expected integration point. "
@@ -500,10 +505,14 @@ class TaskReviewSession:
             "Every finding must include an AI-ready imperative agent_prompt specific to its component and correction; "
             "preserve behavior, follow repository conventions and company rules, avoid unrelated changes, and request relevant tests. "
             "Keep body focused on the defect and correction; do not include retrieval, token-budget, tool-call, or other internal diagnostics. "
-            "Findings on unchanged files remain individual findings and will be published as separate conversation notes. "
+            "Findings on unchanged files remain individual findings, cite verified source evidence, and are published "
+            "as separate conversation notes; never fabricate a diff line or existing_code for them. "
             "Do not invent paths for missing functionality. For each actionable finding, use its own path/line. "
             "The summary is not a place to report or combine findings. "
-            "Do not duplicate existing reviewed findings. Company rules retain highest priority. "
+            "Do not duplicate existing reviewed findings. Do not report speculative concurrency or library claims, "
+            "generic Clean Code advice, unchanged legacy defects, or missing tests without meaningful risk. "
+            "Each independent root cause gets its own comment; do not repeat findings in a summary or key issue. "
+            "Company rules retain highest priority. "
             "Report uncertainty honestly, including when pre-existing versus introduced cannot be established.\n"
             + CONSISTENCY_INSTRUCTIONS
             + "\nTrusted organizational rules:\n"
@@ -762,7 +771,8 @@ class TaskReviewSession:
         result.repository_comments = [
             ensure_agent_prompt(comment) for comment in result.repository_comments
         ]
-        if not self.options.post_comments:
+        add_description = bool(engine.add_description and result.change_description)
+        if not self.options.post_comments and not add_description:
             return "disabled"
         self.progress("publishing")
         provider = engine.provider
@@ -773,6 +783,11 @@ class TaskReviewSession:
             )
             return "stale_head"
         posted = False
+        if add_description:
+            await provider.post_comment(self.pr_info, result.change_description)
+            posted = True
+        if not self.options.post_comments:
+            return "posted" if posted else "disabled"
         threads = (
             await provider.get_unresolved_bot_threads(self.pr_info, engine.bot_name)
             if result.comments

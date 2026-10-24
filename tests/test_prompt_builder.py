@@ -46,6 +46,22 @@ class TestBuildReviewPrompt:
         assert "submit_review" in system
         assert "blocker" in system
 
+    def test_prompt_separates_evidence_based_inline_and_repository_findings(self):
+        files = [
+            FileDiff(
+                path="src/app.py",
+                change_type=FileChangeType.MODIFIED,
+                hunks=[HunkInfo(1, 2, 1, 2, "@@ -1 +1 @@\n-old\n+new")],
+            )
+        ]
+        system = build_review_prompt(files, MiraConfig())[0]["content"]
+        assert "Each inline comment must target a valid changed line" in system
+        assert "never fabricate a diff position or code quote" in system
+        assert "verified source evidence" in system
+        assert "Do not require a test-file change for every PR" in system
+        assert "representative implementations from the same repository" in system
+        assert "Do not restate finding titles" in system
+
     def test_includes_file_paths(self):
         files = [
             FileDiff(
@@ -122,7 +138,7 @@ class TestBuildReviewPrompt:
         messages = build_review_prompt(files, config)
         system = messages[0]["content"]
         assert "You may suggest improvements" in system
-        assert "Only comment on critical problems" not in system
+        assert "Focus on material correctness" not in system
 
     def test_focus_on_shows_problems_only(self):
         files = [
@@ -138,7 +154,8 @@ class TestBuildReviewPrompt:
         config = MiraConfig(review={"focus_only_on_problems": True})
         messages = build_review_prompt(files, config)
         system = messages[0]["content"]
-        assert "Only comment on critical problems" in system
+        assert "Focus on material correctness" in system
+        assert "does not override a directly applicable mandatory company rule" in system
         assert "You may suggest improvements" not in system
 
     def test_scope_boundary_instructions(self):

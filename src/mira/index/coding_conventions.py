@@ -37,7 +37,8 @@ Explain why the deviation is unjustified and why the correction benefits this co
 Stylistic findings are nitpicks. Use higher severity only for concrete architecture or
 behavioral impact. Explicit company violations remain in the existing policy review.
 Reuse existing findings: do not repeat Clean Code, architecture, or company-policy findings.
-Unchanged locations belong in the summary, never on an unrelated changed line.
+When the verified finding location is unchanged, keep it as a repository-level finding with
+evidence at that exact source location; never move it to an unrelated changed line.
 If comparisons are absent, ambiguous or insufficient, report no inferred convention violation.
 Only violation assessments may become findings; the other assessments explain why no finding is warranted.
 """

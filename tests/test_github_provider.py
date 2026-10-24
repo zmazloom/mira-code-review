@@ -304,7 +304,7 @@ class TestPostReviewGracefulDegradation:
         def _create_review(**kwargs):
             review_calls.append(kwargs)
             comments = kwargs.get("comments") or []
-            # Batch fails; summary-only (empty comments) succeeds.
+            # Batch fails and the provider falls back to individual comments.
             if comments:
                 raise gh_422
 
@@ -323,14 +323,11 @@ class TestPostReviewGracefulDegradation:
 
         await provider.post_review(pr_info, result)
 
-        # 1 batch /reviews call + 1 individual /comments call + 1 summary-
-        # only /reviews call.
-        assert len(review_calls) == 2  # batch + summary-only
+        # One failed batch attempt followed by one individual inline fallback.
+        assert len(review_calls) == 1
         assert mock_pr.create_review_comment.call_count == 1
-        # Summary-only call is the last /reviews call and has comments=[].
-        final = review_calls[-1]
-        assert final.get("comments") == []
-        assert "Mira Review Summary" in final.get("body", "")
+        assert review_calls[0].get("comments")
+        assert review_calls[0].get("body") == ""
 
     @pytest.mark.asyncio
     async def test_partial_individual_success(self):
@@ -392,7 +389,7 @@ class TestPostReviewGracefulDegradation:
         await provider.post_review(pr_info, result)
 
         # 1 batch (failed) + 2 individual /comments calls.
-        # No summary-only fallback because b.py posted.
+        # No extra aggregate summary comment is posted.
         assert mock_pr.create_review.call_count == 1
         assert mock_pr.create_review_comment.call_count == 2
 

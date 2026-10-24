@@ -15,7 +15,7 @@ from typing import Literal
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from mira.config import load_config
@@ -45,6 +45,7 @@ class ReviewStatus(BaseModel):
 class Job:
     owner: int
     result: ReviewStatus
+    add_description: bool = False
     finished_at: float | None = None
 
 
@@ -87,6 +88,8 @@ async def _run(job: Job) -> None:
             command.extend(["--config", os.environ["MIRA_CONFIG"]])
         if job.result.model:
             command.extend(["--model", job.result.model])
+        if job.add_description:
+            command.append("--add-description")
         # Argument arrays avoid interpreting user input as shell commands.
         completed = await asyncio.to_thread(
             subprocess.run,
@@ -163,13 +166,17 @@ async def review_models(request: Request) -> dict:
 
 
 @router.post("", response_model=ReviewStatus, status_code=202)
-async def start_review(body: ReviewRequest, request: Request) -> ReviewStatus:
+async def start_review(
+    body: ReviewRequest,
+    request: Request,
+    add_description: bool = Query(default=False, alias="addDescription"),
+) -> ReviewStatus:
     owner = _user_id(request)
     validate_review_url(body.url, body.platform)
     result = ReviewStatus(
         id=uuid4().hex, platform=body.platform, url=body.url.strip(), model=body.model
     )
-    job = reserve_job(owner, result)
+    job = reserve_job(owner, result, add_description=add_description)
     task = asyncio.create_task(_run(job))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
@@ -216,7 +223,9 @@ def validate_review_url(value: str, platform: str | None = None):
     return reference
 
 
-def reserve_job(owner: int, result: ReviewStatus) -> Job:
+def reserve_job(
+    owner: int, result: ReviewStatus, *, add_description: bool = False
+) -> Job:
     now = time.monotonic()
     for key, job in list(_jobs.items()):
         if job.finished_at is not None and now - job.finished_at > 86400:
@@ -226,7 +235,7 @@ def reserve_job(owner: int, result: ReviewStatus) -> Job:
         raise HTTPException(409, "Your previous review is still running.")
     if len(active) >= 4:
         raise HTTPException(429, "All review slots are busy. Try again later.")
-    job = Job(owner=owner, result=result)
+    job = Job(owner=owner, result=result, add_description=add_description)
     _jobs[result.id] = job
     return job
 
