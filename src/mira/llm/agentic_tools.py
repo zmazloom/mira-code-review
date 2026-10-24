@@ -14,6 +14,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from mira.index.context import SourceFetcher
@@ -112,6 +113,11 @@ class AgenticToolExecutor:
     bytes_used: int = 0
     _content_cache: dict[str, str | None] = field(default_factory=dict)
     call_log: list[dict] = field(default_factory=list)
+    max_calls: int | None = None
+    on_budget_exhausted: Callable[[], None] | None = None
+    literal_search: bool = False
+    exposed_paths: set[str] = field(default_factory=set)
+    on_truncation: Callable[[], None] | None = None
 
     async def execute(self, name: str, args: dict) -> str:
         """Dispatch a tool call. Returns the tool result as a string.
@@ -121,10 +127,16 @@ class AgenticToolExecutor:
         different path). The string is what gets fed back into the next
         LLM hop as a `tool` message.
         """
+        if self.max_calls is not None and len(self.call_log) >= self.max_calls:
+            if self.on_budget_exhausted:
+                self.on_budget_exhausted()
+            return "[tool call budget exhausted; submit the review with unverified requirements]"
         arg = (args or {}).get("path") or (args or {}).get("pattern") or ""
         self.call_log.append({"tool": name, "arg": arg})
 
         if self.bytes_used >= _MAX_TOTAL_OUTPUT_BYTES:
+            if self.on_budget_exhausted:
+                self.on_budget_exhausted()
             return "[tool budget exhausted — no more tool calls accepted; submit your review now]"
 
         try:
@@ -146,6 +158,12 @@ class AgenticToolExecutor:
             logger.debug("Tool %s failed: %s", name, exc)
             return f"[error executing `{name}`: {exc}]"
 
+        remaining = _MAX_TOTAL_OUTPUT_BYTES - self.bytes_used
+        if len(result) > remaining:
+            suffix = "\n[tool output truncated]"
+            result = (result[: max(0, remaining - len(suffix))] + suffix)[:remaining]
+            if self.on_truncation:
+                self.on_truncation()
         self.bytes_used += len(result)
         return result
 
@@ -169,6 +187,10 @@ class AgenticToolExecutor:
         if len(content) > _MAX_FILE_BYTES:
             content = content[:_MAX_FILE_BYTES]
             truncated = True
+            if self.on_truncation:
+                self.on_truncation()
+
+        self.exposed_paths.add(path)
 
         # Number lines so the LLM can cite them by number when filing comments.
         numbered = "\n".join(f"{i + 1:>5}  {line}" for i, line in enumerate(content.split("\n")))
@@ -178,6 +200,10 @@ class AgenticToolExecutor:
         return f"`{path}`:\n```\n{numbered}{suffix}\n```"
 
     async def _grep_repo(self, pattern: str, path_glob: str | None, path_only: bool) -> str:
+        if self.literal_search:
+            if len(pattern) > 256 or (path_glob and len(path_glob) > 256):
+                return "[search pattern exceeds the task review limit]"
+            pattern = re.escape(pattern)
         if not self.repo_tree:
             return "[grep unavailable: repo tree not loaded]"
 
@@ -248,6 +274,7 @@ class AgenticToolExecutor:
 
             for lineno, line in enumerate(content.split("\n"), start=1):
                 if rx.search(line):
+                    self.exposed_paths.add(cand)
                     snippet = line.strip()
                     if len(snippet) > _MAX_GREP_BYTES_PER_HIT:
                         snippet = snippet[:_MAX_GREP_BYTES_PER_HIT] + "…"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import html
 import re
 
+from mira.llm.remediation import ensure_agent_prompt
 from mira.localization import is_persian
 from mira.models import KeyIssue, ReviewComment, Severity
 
@@ -187,9 +188,14 @@ def format_comment_body(
     comment: ReviewComment,
     bot_name: str = "miracodeai",
     output_language: str = "en",
+    *,
+    include_location: bool = False,
 ) -> str:
     """Format a review comment body with category badge, severity, and suggestion block."""
-    fa = is_persian(output_language)
+    comment = ensure_agent_prompt(comment)
+    fa = comment.source_pass == "task" or is_persian(output_language)
+    if fa:
+        return _format_persian_finding(comment, include_location=include_location)
     categories = _CATEGORY_DISPLAY_FA if fa else _CATEGORY_DISPLAY
     label = categories.get(comment.category, ("\U0001f4cc", "نکته" if fa else "Note"))[1]
     badges = _SEVERITY_BADGE_FA if fa else _SEVERITY_BADGE
@@ -253,3 +259,35 @@ def format_comment_body(
     )
 
     return "\n".join(parts)
+
+
+def _format_persian_finding(comment: ReviewComment, *, include_location: bool = False) -> str:
+    """Render one actionable Persian finding and its dedicated AI fix prompt."""
+    severity = {
+        Severity.BLOCKER: "🛑 بحرانی",
+        Severity.WARNING: "⚠️ هشدار",
+        Severity.SUGGESTION: "💡 پیشنهاد",
+        Severity.NITPICK: "💬 نکته جزئی",
+    }.get(comment.severity, "ℹ️ بررسی")
+    title = comment.title.strip()
+    if include_location:
+        title += f" (`{comment.path}:{comment.line}`)"
+    suggestion = comment.suggestion or f"در `{comment.path}`، «{comment.title}» را اصلاح کنید."
+    prompt = comment.agent_prompt or ""
+    fence = "`" * max(3, max((len(m.group(0)) for m in re.finditer(r"`+", prompt)), default=0) + 1)
+    return "\n".join(
+        [
+            f"**{severity}  {title}**",
+            "",
+            "**اشکال:**",
+            comment.body.strip(),
+            "",
+            "**راهکار:**",
+            suggestion.strip(),
+            "",
+            "**پرامپت رفع مشکل:**",
+            f"{fence}text",
+            prompt,
+            fence,
+        ]
+    )

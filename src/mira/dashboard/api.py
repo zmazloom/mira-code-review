@@ -47,6 +47,9 @@ def register_dashboard(app: FastAPI) -> None:
     from mira.dashboard.manual_reviews import router as manual_reviews_router
 
     app.include_router(manual_reviews_router)
+    from mira.dashboard.task_reviews import router as task_reviews_router
+
+    app.include_router(task_reviews_router)
 
 
 # Standalone app — initialized at module load, but routes are registered at

@@ -98,6 +98,10 @@ class BaseProvider(abc.ABC):
         """Diff between two commits, for incremental (round 2+) reviews."""
         return ""
 
+    async def get_task_diff(self, pr_info: PRInfo) -> str:
+        """Resolve an immutable PR snapshot. Providers must explicitly support this."""
+        raise NotImplementedError("Pinned task review is not supported by this provider")
+
     async def get_all_bot_threads(
         self, pr_info: PRInfo, bot_login: str | None = None
     ) -> list[BotThreadRecord]:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+from collections.abc import Callable
 
 from mira.config import load_config
 from mira.dashboard.models_config import llm_config_for
@@ -36,6 +37,9 @@ async def agentic_review_loop(
     messages: list[dict],
     executor: object,
     output_language: str | None = None,
+    terminal_tool: dict | None = None,
+    max_hops: int = 6,
+    can_continue: Callable[[list[dict], list[dict]], bool] | None = None,
 ) -> str:
     """Run an agentic tool-use loop until the LLM submits a review.
 
@@ -47,7 +51,7 @@ async def agentic_review_loop(
     """
     from mira.llm.agentic_tools import AGENTIC_TOOLS
 
-    tools = [*AGENTIC_TOOLS, SUBMIT_REVIEW_TOOL]
+    tools = [*AGENTIC_TOOLS, terminal_tool or SUBMIT_REVIEW_TOOL]
     convo: list[dict] = [dict(m) for m in messages]
     if convo:
         convo[0]["content"] = append_language_instruction(
@@ -67,8 +71,9 @@ async def agentic_review_loop(
             "`submit_review` with all your findings."
         )
 
-    max_hops = 6
     for hop in range(max_hops):
+        if can_continue is not None and not can_continue(convo, tools):
+            return ""
         try:
             msg = await llm.complete_agentic(convo, tools=tools)
         except Exception as exc:
@@ -175,9 +180,7 @@ async def security_review_pass(
         provider=sec_llm if hasattr(sec_llm, "count_tokens") else None,
     )
     if len(chunks) <= 1:
-        return await _security_scan_once(
-            sec_llm, llm, target_files, pr_title, output_language
-        )
+        return await _security_scan_once(sec_llm, llm, target_files, pr_title, output_language)
 
     logger.info(
         "Security pass: splitting %d files into %d chunks (single-call budget %d tokens)",
@@ -580,6 +583,8 @@ async def regenerate_summary(
         )
 
     text = (text or "").strip()
-    return text or fallback or (
-        "مشکلی یافت نشد." if is_persian(output_language) else "No issues found."
+    return (
+        text
+        or fallback
+        or ("مشکلی یافت نشد." if is_persian(output_language) else "No issues found.")
     )

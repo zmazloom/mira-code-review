@@ -41,10 +41,20 @@ def _is_duplicate(
     - Same file + non-overlapping lines but near-identical titles (>= title_threshold)
     """
     title_sim = _jaccard_similarity(a.title, b.title)
+    body_sim = _jaccard_similarity(a.body, b.body)
+
+    # Task assessment can produce separate defects at one integration point.
+    # Preserve those unless both their titles and explanations describe the
+    # same issue; sharing a line/category alone is not sufficient evidence.
+    if a.source_pass == b.source_pass == "task":
+        if a.path != b.path:
+            return title_sim >= 0.8 and body_sim >= 0.5
+        overlap = _lines_overlap(a, b)
+        title_floor = 0.6 if overlap else title_threshold
+        return title_sim >= title_floor and body_sim >= 0.45
 
     # Cross-file: near-identical title + similar body → same conceptual issue
     if a.path != b.path:
-        body_sim = _jaccard_similarity(a.body, b.body)
         return title_sim >= 0.8 and body_sim >= 0.5
 
     overlap = _lines_overlap(a, b)

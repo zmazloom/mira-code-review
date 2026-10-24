@@ -272,7 +272,14 @@ adding `--volumes` deletes it. The private key is mounted read-only and excluded
 from the image. GitHub webhooks need a publicly reachable URL pointing to
 `/github/webhook` on this server.
 
-The dashboard's **Start review** page accepts a GitHub pull request or GitLab
+The dashboard also supports **Task-aware repository review**: provide a PR/MR
+URL and implementation task to verify requirements against relevant source at
+the resolved head commit. It supports review depths, optional publishing, and
+structured results through `POST /api/reviews/task-aware`.
+See [the API and implementation guide](docs/task-aware-review.md) for requests,
+results, budgets, security, and coverage limitations.
+
+The dashboard's standard **Start review** option accepts a GitHub pull request or GitLab
 merge request link and runs `mira review-notif <url>` in the background. This
 command fetches the request title first. Only titles beginning with `Notif MR`
 (case-insensitive) are reviewed and posted. Other titles return **Skipped**

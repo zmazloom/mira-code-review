@@ -203,6 +203,10 @@ class GitHubProvider(BaseProvider):
             gh_repo = self._github.get_repo(f"{owner}/{repo}")
             pr = gh_repo.get_pull(number)
             user = pr.user
+            source = getattr(getattr(pr.head, "repo", None), "full_name", "")
+            source_parts = (
+                source.split("/", 1) if isinstance(source, str) and "/" in source else ["", ""]
+            )
             return PRInfo(
                 title=pr.title or "",
                 description=pr.body or "",
@@ -213,6 +217,9 @@ class GitHubProvider(BaseProvider):
                 owner=owner,
                 repo=repo,
                 head_sha=pr.head.sha or "",
+                source_owner=source_parts[0],
+                source_repo=source_parts[1],
+                base_sha=pr.base.sha if isinstance(pr.base.sha, str) else "",
                 author=(user.login or "") if user else "",
                 author_avatar_url=(user.avatar_url or "") if user else "",
             )
@@ -223,6 +230,21 @@ class GitHubProvider(BaseProvider):
             raise
         except Exception as e:
             raise ProviderError(f"Failed to fetch PR info: {e}") from e
+
+    async def get_task_diff(self, pr_info: PRInfo) -> str:
+        if not pr_info.head_sha or not pr_info.base_sha or not pr_info.source_owner:
+            raise ProviderError("PR source repository or commit is unavailable")
+        url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/compare/{pr_info.base_sha}...{pr_info.head_sha}"
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers={"Authorization": f"token {self._token}"})
+            response.raise_for_status()
+            data = response.json()
+        pr_info.merge_base_sha = data["merge_base_commit"]["sha"]
+        pr_info.commits = [
+            {"sha": c["sha"], "message": c.get("commit", {}).get("message", "")[:1000]}
+            for c in data.get("commits", [])[:100]
+        ]
+        return await self.get_compare_diff(pr_info, pr_info.base_sha, pr_info.head_sha)
 
     async def get_pr_diff(self, pr_info: PRInfo) -> str:
         diff_url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/pulls/{pr_info.number}"
@@ -456,10 +478,13 @@ class GitHubProvider(BaseProvider):
             gh_repo = self._github.get_repo(f"{pr_info.owner}/{pr_info.repo}")
             pr = gh_repo.get_pull(pr_info.number)
 
-            commits = list(pr.get_commits())
-            if not commits:
-                raise ProviderError("PR has no commits")
-            latest_commit = commits[-1]
+            if result.task_review is not None:
+                latest_commit = gh_repo.get_commit(pr_info.head_sha)
+            else:
+                commits = list(pr.get_commits())
+                if not commits:
+                    raise ProviderError("PR has no commits")
+                latest_commit = commits[-1]
 
             # GitHub comment IDs aligned to result.comments (0 = unknown).
             ids = [0] * len(result.comments)
@@ -851,7 +876,7 @@ class GitHubProvider(BaseProvider):
         spending API calls fetching their contents. One API call → up to
         thousands of paths in response.
         """
-        url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/git/trees/{ref}?recursive=1"
+        url = f"{_GITHUB_API_URL}/repos/{pr_info.source_repository}/git/trees/{ref}?recursive=1"
         headers = {
             "Authorization": f"token {self._token}",
             "Accept": "application/vnd.github+json",
@@ -863,6 +888,8 @@ class GitHubProvider(BaseProvider):
                 resp = await client.get(url, headers=headers, follow_redirects=True)
                 resp.raise_for_status()
                 data = resp.json()
+            if data.get("truncated"):
+                raise ProviderError("Repository tree is truncated")
             return [item["path"] for item in data.get("tree", []) if item.get("type") == "blob"]
 
         try:
@@ -873,7 +900,7 @@ class GitHubProvider(BaseProvider):
 
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Fetch file content at a specific ref via the REST API."""
-        url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/contents/{path}"
+        url = f"{_GITHUB_API_URL}/repos/{pr_info.source_repository}/contents/{path}"
         headers = {
             "Authorization": f"token {self._token}",
             "Accept": "application/vnd.github.v3+json",
@@ -1061,7 +1088,7 @@ class GitHubProvider(BaseProvider):
             "Authorization": f"token {self._token}",
             "Accept": "application/vnd.github.v3+json",
         }
-        base = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/commits"
+        base = f"{_GITHUB_API_URL}/repos/{pr_info.source_repository}/commits"
 
         async def _fetch_one(
             client: httpx.AsyncClient, path: str
@@ -1071,7 +1098,11 @@ class GitHubProvider(BaseProvider):
                     resp = await client.get(
                         base,
                         headers=headers,
-                        params={"path": path, "per_page": max_per_file},
+                        params={
+                            "path": path,
+                            "per_page": max_per_file,
+                            "sha": pr_info.head_sha or pr_info.head_branch,
+                        },
                     )
                     if resp.status_code != 200:
                         return path, []

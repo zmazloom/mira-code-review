@@ -74,8 +74,15 @@ def _failure_message(stderr: str) -> str:
 
 async def _run(job: Job) -> None:
     try:
-        command = [sys.executable, "-c", "from mira.cli import main; main()",
-                   "review-notif", job.result.url, "--output", "json"]
+        command = [
+            sys.executable,
+            "-c",
+            "from mira.cli import main; main()",
+            "review-notif",
+            job.result.url,
+            "--output",
+            "json",
+        ]
         if os.environ.get("MIRA_CONFIG"):
             command.extend(["--config", os.environ["MIRA_CONFIG"]])
         if job.result.model:
@@ -84,7 +91,10 @@ async def _run(job: Job) -> None:
         completed = await asyncio.to_thread(
             subprocess.run,
             command,
-            capture_output=True, text=True, timeout=3600, check=False,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            check=False,
         )
         # CLI exit code 1 also means a completed review found blockers.
         # Only the structured posting result proves completion in that case.
@@ -92,15 +102,26 @@ async def _run(job: Job) -> None:
             outcome = json.loads(completed.stdout)
         except (ValueError, TypeError):
             outcome = {}
-        if completed.returncode == 0 and outcome.get("status") == "skipped" and outcome.get("posted") is False:
+        if (
+            completed.returncode == 0
+            and outcome.get("status") == "skipped"
+            and outcome.get("posted") is False
+        ):
             job.result.status = "skipped"
-            job.result.message = "Skipped. The request title must start with 'Notif MR' (case-insensitive)."
+            job.result.message = (
+                "Skipped. The request title must start with 'Notif MR' (case-insensitive)."
+            )
         elif completed.returncode in (0, 1) and outcome.get("posted") is True:
             job.result.status = "done"
             job.result.message = "Done. Review completed and posted."
         else:
             message = _failure_message(getattr(completed, "stderr", ""))
-            logger.warning("Manual review %s failed (CLI exit %s): %s", job.result.id, completed.returncode, message)
+            logger.warning(
+                "Manual review %s failed (CLI exit %s): %s",
+                job.result.id,
+                completed.returncode,
+                message,
+            )
             job.result.status = "failed"
             job.result.message = message
     except subprocess.TimeoutExpired:
@@ -121,10 +142,19 @@ async def review_models(request: Request) -> dict:
 
     config = load_config(os.environ.get("MIRA_CONFIG")).llm
     default = llm_config_for("review", config).model
-    models = list(dict.fromkeys(model for model in (
-        config.model, config.review_model, config.indexing_model,
-        config.security_model, default,
-    ) if model))
+    models = list(
+        dict.fromkeys(
+            model
+            for model in (
+                config.model,
+                config.review_model,
+                config.indexing_model,
+                config.security_model,
+                default,
+            )
+            if model
+        )
+    )
     catalog = await fetch_catalog(config)
     options = {model: {"value": model, "label": model} for model in models}
     for option in catalog or []:
@@ -135,26 +165,58 @@ async def review_models(request: Request) -> dict:
 @router.post("", response_model=ReviewStatus, status_code=202)
 async def start_review(body: ReviewRequest, request: Request) -> ReviewStatus:
     owner = _user_id(request)
-    url = body.url.strip()
+    validate_review_url(body.url, body.platform)
+    result = ReviewStatus(
+        id=uuid4().hex, platform=body.platform, url=body.url.strip(), model=body.model
+    )
+    job = reserve_job(owner, result)
+    task = asyncio.create_task(_run(job))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+    return result
+
+
+def validate_review_url(value: str, platform: str | None = None):
+    """Shared platform/credential validation; submitted hosts never configure API URLs."""
+    url = value.strip()
     try:
         parsed = urlparse(url)
         reference = parse_pull_request_reference(url)
+        port = parsed.port
     except (ManualReviewError, ValueError) as exc:
         raise HTTPException(422, "Enter a valid GitHub PR or GitLab MR URL.") from exc
     if parsed.scheme not in {"https", "http"} or parsed.username or parsed.password:
         raise HTTPException(422, "Enter a full PR/MR URL without embedded credentials.")
-    if reference.provider != body.platform or reference.number < 1:
+    if port not in {None, 443 if parsed.scheme == "https" else 80} or any(c.isspace() for c in url):
+        raise HTTPException(422, "Enter a canonical PR/MR URL.")
+    if (
+        reference.provider not in {"github", "gitlab"}
+        or (platform and reference.provider != platform)
+        or reference.number < 1
+    ):
         raise HTTPException(422, "The link does not match the selected platform.")
     token_names = (
-        ("GITHUB_TOKEN", "MIRA_GIT_TOKEN") if body.platform == "github"
+        ("GITHUB_TOKEN", "MIRA_GIT_TOKEN")
+        if reference.provider == "github"
         else ("GITLAB_TOKEN", "MIRA_GITLAB_TOKEN", "MIRA_GIT_TOKEN")
     )
     if not any(os.environ.get(name) for name in token_names):
         raise HTTPException(422, f"Configure {' or '.join(token_names)} on the server first.")
-    if body.platform == "gitlab":
-        api_host = urlparse(os.environ.get("MIRA_GITLAB_API_URL", "https://gitlab.com/api/v4")).hostname
+    if reference.provider == "gitlab":
+        api_host = urlparse(
+            os.environ.get("MIRA_GITLAB_API_URL", "https://gitlab.com/api/v4")
+        ).hostname
         if parsed.hostname != api_host:
             raise HTTPException(422, "The MR link must use the configured GitLab server.")
+    if any(
+        part in {".", "..", ""} or not re.fullmatch(r"[A-Za-z0-9_.-]+", part)
+        for part in (reference.owner + "/" + reference.repo).split("/")
+    ) or any(c in reference.owner + reference.repo for c in "\\%?#"):
+        raise HTTPException(422, "Invalid repository path.")
+    return reference
+
+
+def reserve_job(owner: int, result: ReviewStatus) -> Job:
     now = time.monotonic()
     for key, job in list(_jobs.items()):
         if job.finished_at is not None and now - job.finished_at > 86400:
@@ -164,13 +226,9 @@ async def start_review(body: ReviewRequest, request: Request) -> ReviewStatus:
         raise HTTPException(409, "Your previous review is still running.")
     if len(active) >= 4:
         raise HTTPException(429, "All review slots are busy. Try again later.")
-    result = ReviewStatus(id=uuid4().hex, platform=body.platform, url=url, model=body.model)
     job = Job(owner=owner, result=result)
     _jobs[result.id] = job
-    task = asyncio.create_task(_run(job))
-    _tasks.add(task)
-    task.add_done_callback(_tasks.discard)
-    return result
+    return job
 
 
 @router.get("/{job_id}", response_model=ReviewStatus)

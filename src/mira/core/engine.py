@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from mira.core.task_review import TaskReviewSession
     from mira.llm.base import LLMProviderProtocol
 
 from mira.analysis.severity import classify_severity
@@ -28,9 +29,10 @@ from mira.core.passes import (
     self_critique,
 )
 from mira.core.priority import rank_files
+from mira.core.task_budget import TaskBudgetExceeded
 from mira.core.threads import resolve_verified_threads, short_thread_description
 from mira.exceptions import MiraError, ResponseParseError
-from mira.index.context import build_code_context
+from mira.index.context import SourceFetcher, build_code_context
 from mira.index.manifests import _is_lockfile_path, is_manifest
 from mira.index.store import IndexStore
 from mira.llm.prompts.review import (
@@ -39,6 +41,7 @@ from mira.llm.prompts.review import (
     build_walkthrough_prompt,
     partition_company_rules,
 )
+from mira.llm.remediation import ensure_agent_prompt
 from mira.llm.response_parser import (
     convert_to_review_comments,
     convert_to_walkthrough_result,
@@ -407,6 +410,7 @@ class ReviewEngine:
         self._index_was_empty = False
         self._agentic_source_fetcher: object | None = None
         self._agentic_repo_tree: list[str] = []
+        self.task_session: TaskReviewSession | None = None
 
     async def _post_placeholder_comment(self, pr_info: PRInfo) -> int | None:
         """Post an immediate 'Reviewing this PR...' comment and return its ID.
@@ -418,8 +422,7 @@ class ReviewEngine:
             return None
         if is_persian(self.config.review.output_language):
             placeholder = (
-                f"{WALKTHROUGH_MARKER}\n## مرور تغییرات PR توسط AI\n\n"
-                "*🔍 در حال بررسی این PR…*\n"
+                f"{WALKTHROUGH_MARKER}\n## مرور تغییرات PR توسط AI\n\n*🔍 در حال بررسی این PR…*\n"
             )
         else:
             placeholder = (
@@ -565,9 +568,16 @@ class ReviewEngine:
                 return 0, 0, [], []
 
         thread_result, diff_text = await _asyncio.gather(
-            _resolve_threads(),
-            self.provider.get_pr_diff(pr_info),
+            _resolve_threads()
+            if self.task_session is None
+            else _asyncio.sleep(0, result=(0, 0, [], [])),
+            self.provider.get_pr_diff(pr_info)
+            if self.task_session is None
+            else self.provider.get_task_diff(pr_info),
         )
+
+        if self.task_session is not None:
+            await self.task_session.prepare(self, pr_info, diff_text)
 
         threads_checked, llm_resolved, unresolved_threads, thread_decisions = thread_result
 
@@ -629,7 +639,9 @@ class ReviewEngine:
         # Overlap detection keeps the full diff — its fingerprint must cover the
         # whole PR, not just the latest commits.
         full_diff_text = diff_text
-        if review_round >= 2 and pr_info.head_sha:
+        if self.task_session is not None:
+            review_round = 1
+        if review_round >= 2 and pr_info.head_sha and self.task_session is None:
             try:
                 from mira.dashboard.api import _app_db
 
@@ -713,6 +725,8 @@ class ReviewEngine:
                 resolved_threads=resolved_thread_dicts or None,
                 team_conventions=team_conventions,
             )
+            if self.task_session is not None:
+                await self.task_session.assess(self, result, diff_text)
         except BaseException as exc:
             if overlap_task is not None:
                 overlap_task.cancel()
@@ -891,8 +905,10 @@ class ReviewEngine:
             # failed) — finalize the placeholder so it doesn't sit on
             # "Reviewing this PR…" forever.
             fa = is_persian(self.config.review.output_language)
-            reason = result.skipped_reason or result.summary or (
-                "مرور تغییرات تولید نشد." if fa else "Walkthrough was not generated."
+            reason = (
+                result.skipped_reason
+                or result.summary
+                or ("مرور تغییرات تولید نشد." if fa else "Walkthrough was not generated.")
             )
             heading = "## مرور تغییرات AI توسط AI" if fa else "## AI PR Walkthrough"
             markdown = f"{WALKTHROUGH_MARKER}\n{heading}\n\n*{reason}*\n"
@@ -930,6 +946,11 @@ class ReviewEngine:
             )
 
         result.thread_decisions = thread_decisions
+
+        # Task jobs persist their full structured result separately. Do not move
+        # the standard review's incremental SHA or review-rest progress forward.
+        if self.task_session is not None:
+            return result
 
         try:
             import json as _json
@@ -1089,6 +1110,13 @@ class ReviewEngine:
             )
 
         filtered = filter_files(patch.files, self.config.filter)
+        if self.task_session is not None:
+            safe_files = [f for f in filtered if not any(ord(c) < 32 for c in f.path)]
+            if len(safe_files) != len(filtered):
+                self.task_session.note(
+                    "Files with unsafe control characters in their paths were excluded."
+                )
+            filtered = safe_files
         if not filtered:
             return ReviewResult(
                 summary=(
@@ -1159,8 +1187,8 @@ class ReviewEngine:
                 wt_messages = build_walkthrough_prompt(
                     files=filtered,
                     config=self.config,
-                    pr_title=pr_title,
-                    pr_description=pr_description,
+                    pr_title="" if self.task_session is not None else pr_title,
+                    pr_description="" if self.task_session is not None else pr_description,
                 )
                 wt_raw = await self.llm.walkthrough(wt_messages)
                 wt_parsed = parse_walkthrough_response(wt_raw)
@@ -1170,6 +1198,21 @@ class ReviewEngine:
                 return None
 
         async def _build_context() -> str:
+            if self.task_session is not None:
+                context = self.task_session.context
+                pr_info = getattr(self, "_pr_info", None)
+                if pr_info is not None:
+                    store = IndexStore.open(pr_info.owner, pr_info.repo, platform=pr_info.platform)
+                    try:
+                        # Keep installation-managed review documents just as the
+                        # standard context path does, including fork reviews.
+                        documents = store.get_all_review_context_text()
+                        self.task_session.review_documents = documents
+                        if documents:
+                            context += "\n\n" + documents
+                    finally:
+                        store.close()
+                return context
             if not self.config.review.code_context:
                 return ""
             try:
@@ -1181,7 +1224,7 @@ class ReviewEngine:
                         from mira.index.context import ProviderSourceFetcher
 
                         source_fetcher = ProviderSourceFetcher(
-                            self.provider, pr_info, pr_info.head_branch
+                            self.provider, pr_info, pr_info.head_sha or pr_info.head_branch
                         )
                     changed_paths = [f.path for f in filtered]
                     ctx = await build_code_context(
@@ -1210,7 +1253,9 @@ class ReviewEngine:
                         if hasattr(self.provider, "get_repo_tree"):
                             try:
                                 tree_paths = set(
-                                    await self.provider.get_repo_tree(pr_info, pr_info.head_branch)
+                                    await self.provider.get_repo_tree(
+                                        pr_info, pr_info.head_sha or pr_info.head_branch
+                                    )
                                 )
                             except Exception as exc:
                                 logger.debug("Repo tree fetch failed: %s", exc)
@@ -1307,7 +1352,17 @@ class ReviewEngine:
 
         chunks = chunk_files(
             expanded,
-            max_tokens=self.config.llm.max_context_tokens,
+            max_tokens=(
+                max(
+                    3000,
+                    self.task_session.budget.context_tokens
+                    - self.llm.count_tokens(code_context_block)
+                    - self.config.llm.max_tokens
+                    - 2500,
+                )
+                if self.task_session is not None
+                else self.config.llm.max_context_tokens
+            ),
             provider=self.llm,
         )
 
@@ -1344,6 +1399,12 @@ class ReviewEngine:
         except Exception:
             pass
 
+        if self.task_session is not None:
+            self.task_session.review_preferences = {
+                "learned_rules": learned_rules,
+                "custom_rules": custom_rules,
+                "team_conventions": team_conventions,
+            }
         valid_paths = {f.path for f in filtered}
         base_existing = list(existing_comments) if existing_comments else []
         semaphore = _asyncio.Semaphore(self.config.review.max_concurrent_chunks)
@@ -1354,6 +1415,12 @@ class ReviewEngine:
             chunk: ReviewChunk,
         ) -> tuple[list[ReviewComment], list[KeyIssue], str]:
             async with semaphore:
+                comments: list[ReviewComment] = []
+                key_issues: list[KeyIssue] = []
+                summary_text = ""
+                company_comments: list[ReviewComment] = []
+                company_key_issues: list[KeyIssue] = []
+                policy_merged = False
                 logger.info(
                     "Reviewing chunk %d/%d (%d files)",
                     idx + 1,
@@ -1374,6 +1441,7 @@ class ReviewEngine:
                         # Company rules run in focused policy passes below.
                         # Supplying them here as well creates duplicate findings.
                         company_rules=None,
+                        task_aware=self.task_session is not None,
                         learned_rules=learned_rules or None,
                         custom_rules=custom_rules or None,
                         file_history=chunk_history or None,
@@ -1405,9 +1473,13 @@ class ReviewEngine:
                     if use_agentic:
                         from mira.llm.agentic_tools import AgenticToolExecutor
 
-                        executor = AgenticToolExecutor(
-                            source_fetcher=self._agentic_source_fetcher,  # type: ignore[arg-type]
-                            repo_tree=list(self._agentic_repo_tree),
+                        executor = (
+                            self.task_session.executor
+                            if self.task_session is not None
+                            else AgenticToolExecutor(
+                                source_fetcher=self._agentic_source_fetcher,  # type: ignore[arg-type]
+                                repo_tree=list(self._agentic_repo_tree),
+                            )
                         )
                         raw_response = await agentic_review_loop(
                             self.llm,
@@ -1424,8 +1496,6 @@ class ReviewEngine:
                     # are otherwise easy for a general-purpose review to
                     # underweight, especially for cross-file companion rules.
                     if company_rules:
-                        company_comments: list[ReviewComment] = []
-                        company_key_issues: list[KeyIssue] = []
                         policy_parts = partition_company_rules(company_rules)
                         for part_idx, policy_part in enumerate(policy_parts):
                             company_messages = build_company_review_prompt(
@@ -1435,12 +1505,17 @@ class ReviewEngine:
                                 pr_title=pr_title,
                                 pr_description=pr_description,
                                 code_context=code_context_block,
+                                task_aware=self.task_session is not None,
                             )
                             company_raw = ""
                             if use_agentic:
-                                company_executor = AgenticToolExecutor(
-                                    source_fetcher=self._agentic_source_fetcher,  # type: ignore[arg-type]
-                                    repo_tree=list(self._agentic_repo_tree),
+                                company_executor = (
+                                    self.task_session.executor
+                                    if self.task_session is not None
+                                    else AgenticToolExecutor(
+                                        source_fetcher=self._agentic_source_fetcher,  # type: ignore[arg-type]
+                                        repo_tree=list(self._agentic_repo_tree),
+                                    )
                                 )
                                 company_raw = await agentic_review_loop(
                                     self.llm,
@@ -1472,6 +1547,7 @@ class ReviewEngine:
                             )
                         comments.extend(company_comments)
                         key_issues.extend(company_key_issues)
+                        policy_merged = True
                         audit.append(
                             {
                                 "stage": "company_policy",
@@ -1527,7 +1603,21 @@ class ReviewEngine:
                             )
 
                     return comments, key_issues, summary_text
+                except TaskBudgetExceeded:
+                    if self.task_session is None:
+                        raise
+                    self.task_session.note(
+                        "Some standard review passes stopped at their allowance; task verification retained its reserved budget."
+                    )
+                    if not policy_merged:
+                        comments.extend(company_comments)
+                        key_issues.extend(company_key_issues)
+                    return comments, key_issues, summary_text
                 except ResponseParseError as exc:
+                    if self.task_session is not None:
+                        self.task_session.note(
+                            "Some standard review output could not be parsed; verification is partial."
+                        )
                     logger.warning(
                         "Chunk %d/%d failed to parse, skipping: %s",
                         idx + 1,
@@ -1542,7 +1632,7 @@ class ReviewEngine:
                 self.llm,
                 filtered,
                 _security_relevant_files(filtered),
-                pr_title,
+                "" if self.task_session is not None else pr_title,
                 security_llm=self.security_llm,
                 output_language=self.config.review.prompt_output_language,
             )
@@ -1556,7 +1646,7 @@ class ReviewEngine:
         # present (empty list on an unindexed repo — pass falls back to the diff).
         manifest_files = manifest_candidates
         existing_packages: list[str] = []
-        pr_source_fetcher = None
+        pr_source_fetcher: SourceFetcher | None = None
         if manifest_files:
             pr_info = getattr(self, "_pr_info", None)
             if pr_info is not None:
@@ -1576,14 +1666,16 @@ class ReviewEngine:
                     from mira.index.context import ProviderSourceFetcher
 
                     pr_source_fetcher = ProviderSourceFetcher(
-                        self.provider, pr_info, pr_info.head_branch
+                        self.provider, pr_info, pr_info.head_sha or pr_info.head_branch
                     )
+                    if self.task_session is not None:
+                        pr_source_fetcher = self.task_session
         dependency_task = _asyncio.create_task(
             dependency_review_pass(
                 self.llm,
                 manifest_files,
                 existing_packages,
-                pr_title,
+                "" if self.task_session is not None else pr_title,
                 indexing_llm=self.indexing_llm,
                 output_language=self.config.review.prompt_output_language,
             )
@@ -1624,8 +1716,7 @@ class ReviewEngine:
         all_comments.extend(osv_comments)
 
         all_comments = [
-            c if c.source_pass == "company" else classify_severity(c)
-            for c in all_comments
+            c if c.source_pass == "company" else classify_severity(c) for c in all_comments
         ]
 
         final_comments = filter_noise(
@@ -1706,7 +1797,7 @@ class ReviewEngine:
         walkthrough = await walkthrough_task
 
         return ReviewResult(
-            comments=final_comments,
+            comments=[ensure_agent_prompt(comment) for comment in final_comments],
             key_issues=all_key_issues,
             summary=summary,
             reviewed_files=len(filtered),

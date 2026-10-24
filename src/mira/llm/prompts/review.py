@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -40,6 +41,7 @@ def build_review_prompt(
     resolved_threads: list[dict] | None = None,
     team_conventions: str = "",
     company_rules: list[dict[str, str]] | None = None,
+    task_aware: bool = False,
 ) -> list[dict[str, str]]:
     """Build the review prompt messages for the LLM.
 
@@ -82,8 +84,8 @@ def build_review_prompt(
     footguns = get_footguns_for_files(files)
 
     system_content = template.render(
-        pr_title=pr_title,
-        pr_description=pr_description,
+        pr_title="" if task_aware else pr_title,
+        pr_description="" if task_aware else pr_description,
         file_contexts=file_contexts,
         file_paths=file_paths,
         confidence_threshold=config.filter.confidence_threshold,
@@ -93,9 +95,9 @@ def build_review_prompt(
         has_code_context=bool(code_context),
         learned_rules=learned_rules,
         custom_rules=custom_rules,
-        file_history=history_for_template,
+        file_history=None if task_aware else history_for_template,
         review_round=review_round,
-        resolved_threads=resolved_threads,
+        resolved_threads=None if task_aware else resolved_threads,
         team_conventions=team_conventions,
         company_rules=company_rules,
         footguns=footguns,
@@ -106,6 +108,18 @@ def build_review_prompt(
 
     # Build user message with optional code context before diffs
     user_parts = []
+    if task_aware:
+        user_parts.append(
+            "Untrusted PR metadata and commit intent:\n"
+            + json.dumps(
+                {
+                    "title": pr_title,
+                    "description": pr_description,
+                    "history": history_for_template,
+                },
+                ensure_ascii=False,
+            )
+        )
     if code_context:
         user_parts.append(code_context)
     user_parts.extend(file_contexts)
@@ -123,6 +137,7 @@ def build_company_review_prompt(
     pr_title: str = "",
     pr_description: str = "",
     code_context: str = "",
+    task_aware: bool = False,
 ) -> list[dict[str, str]]:
     """Build a dedicated pass that checks every company rule.
 
@@ -130,6 +145,9 @@ def build_company_review_prompt(
     installation policy from being diluted by generic review instructions.
     """
     file_paths = [f.path for f in files]
+    untrusted_metadata = {"title": pr_title, "description": pr_description}
+    if task_aware:
+        pr_title = pr_description = ""
     rules = "\n\n".join(
         f"### Source: {rule.get('source', 'company rules')}\n{rule.get('content', '')}"
         for rule in company_rules
@@ -154,7 +172,7 @@ as style preferences, optional improvements, or because of comment limits.
 Only cite exact added or modified code in `existing_code`.
 
 Valid comment paths:
-{chr(10).join(f'- `{path}`' for path in file_paths)}
+{chr(10).join(f"- `{path}`" for path in file_paths)}
 
 Pull request title: {pr_title}
 Pull request description: {pr_description}
@@ -167,6 +185,10 @@ Pull request description: {pr_description}
         system_content, config.review.prompt_output_language
     )
     user_parts = [code_context] if code_context else []
+    if task_aware:
+        user_parts.append(
+            "Untrusted PR metadata:\n" + json.dumps(untrusted_metadata, ensure_ascii=False)
+        )
     user_parts.extend(build_file_context_string(f) for f in files)
     return [
         {"role": "system", "content": system_content},

@@ -6,7 +6,7 @@ Now async with support for fetching real source code from the PR's head branch.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol, runtime_checkable
 
 from mira.index.extract import extract_symbols, find_symbol_by_name
@@ -39,6 +39,14 @@ class ProviderSourceFetcher:
         self._cache: dict[str, str | None] = {}
 
     async def fetch(self, path: str) -> str | None:
+        if (
+            not path
+            or any(c in path for c in "\\:?#%")
+            or PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts
+            or any(p.lower() == ".git" for p in PurePosixPath(path).parts)
+        ):
+            return None
         if path in self._cache:
             return self._cache[path]
         try:

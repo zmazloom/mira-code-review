@@ -144,9 +144,7 @@ class ReviewComment:
     source_pass: str = "main"
 
 
-def _format_stats_breakdown(
-    stats: dict[Severity, int], output_language: str = "en"
-) -> str:
+def _format_stats_breakdown(stats: dict[Severity, int], output_language: str = "en") -> str:
     """Format severity counts as a parenthetical breakdown, e.g. ' (1 blocker, 2 warnings)'."""
     labels = {
         Severity.BLOCKER: "blocker",
@@ -324,7 +322,11 @@ class WalkthroughResult:
 
         if in_progress:
             parts.append("")
-            parts.append("*⏳ بررسی کد در حال انجام است…*" if fa else "*\u23f3 Code review in progress\u2026*")
+            parts.append(
+                "*⏳ بررسی کد در حال انجام است…*"
+                if fa
+                else "*\u23f3 Code review in progress\u2026*"
+            )
         else:
             stats_parts: list[str] = []
             if reviewed_files:
@@ -473,6 +475,10 @@ class ReviewResult:
     # Internal render context only; JSON/tool schemas deliberately remain unchanged.
     output_language: str = "en"
 
+    # Populated only by TASK_AWARE; standard review serialization is unchanged.
+    task_review: dict | None = None
+    repository_comments: list[ReviewComment] = field(default_factory=list)
+
 
 @dataclass
 class PRInfo:
@@ -494,6 +500,16 @@ class PRInfo:
     # and surfaced (with avatar) in the activity dashboard.
     author: str = ""
     author_avatar_url: str = ""
+    source_owner: str = ""
+    source_repo: str = ""
+    source_project_id: int | None = None
+    base_sha: str = ""
+    merge_base_sha: str = ""
+    commits: list[dict] = field(default_factory=list)
+
+    @property
+    def source_repository(self) -> str:
+        return f"{self.source_owner or self.owner}/{self.source_repo or self.repo}"
 
 
 @dataclass

@@ -194,6 +194,9 @@ class ManualReviewCommand:
         post_inline_comments: bool = True,
         bot_name: str = "miracodeai",
         model_override: str | None = None,
+        task_prompt: str | None = None,
+        task_options=None,
+        task_progress=None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -201,9 +204,13 @@ class ManualReviewCommand:
         self.post_inline_comments = post_inline_comments
         self.bot_name = bot_name
         self.model_override = model_override
+        self.task_prompt = task_prompt
+        self.task_options = task_options
+        self.task_progress = task_progress
 
     async def execute(self, reference: PullRequestReference) -> ManualReviewOutcome:
         """Construct configured LLMs and delegate the full review to ``ReviewEngine``."""
+
         def model_config(purpose: str):
             config = llm_config_for(purpose, self.config.llm)
             if self.model_override:
@@ -218,13 +225,28 @@ class ManualReviewCommand:
             llm=llm,
             provider=self.provider,
             bot_name=self.bot_name,
-            dry_run=not self.post,
+            dry_run=not self.post or self.task_prompt is not None,
             post_inline_comments=self.post_inline_comments,
             resolve_threads=self.post_inline_comments,
             indexing_llm=indexing_llm,
             security_llm=security_llm,
         )
+        if self.task_prompt is not None:
+            from mira.core.task_review import TaskReviewOptions, TaskReviewSession
+
+            self.task_session = TaskReviewSession(
+                self.task_prompt, self.task_options or TaskReviewOptions(), self.task_progress
+            )
+            self.task_session.configure(engine)
+        self.engine = engine
         result = await engine.review_pr(reference.url)
+        self.result = result
+        posted = self.post
+        if self.task_prompt is not None:
+            publishing = await self.task_session.publish(engine, result)
+            result.task_review = self.task_session.report()
+            result.task_review["publishing_status"] = publishing
+            posted = publishing in {"posted", "updated"}
         pr_info = getattr(engine, "_pr_info", None)
         if not isinstance(pr_info, PRInfo):
             raise ManualReviewError("Review completed without pull request metadata.")
@@ -232,8 +254,8 @@ class ManualReviewCommand:
             reference=reference,
             pr_info=pr_info,
             result=result,
-            posted=self.post,
-            inline_posted=self.post and self.post_inline_comments,
+            posted=posted,
+            inline_posted=posted and self.post_inline_comments,
         )
 
 
@@ -241,7 +263,8 @@ class NotifReviewCommand(ManualReviewCommand):
     """Check the request title before creating LLMs or running a review."""
 
     async def execute_if_matching(
-        self, reference: PullRequestReference,
+        self,
+        reference: PullRequestReference,
     ) -> ManualReviewOutcome | None:
         pr_info = await self.provider.get_pr_info(reference.url)
         if not pr_info.title.casefold().startswith("notif mr"):

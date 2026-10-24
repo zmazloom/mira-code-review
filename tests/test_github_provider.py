@@ -426,7 +426,7 @@ class TestFormatCommentBody:
         body = _format_comment_body(self._make_comment(suggestion="return json.loads(f.read())"))
         assert "```suggestion" in body
         assert "return json.loads(f.read())" in body
-        assert "```\n\n>" in body
+        assert "</details>\n\n>" in body
 
     def test_blocker_badge(self):
         body = _format_comment_body(self._make_comment(severity=Severity.BLOCKER))
@@ -472,8 +472,11 @@ class TestFormatCommentBodyAgentPrompt:
 
     def test_without_agent_prompt(self):
         body = _format_comment_body(self._make_comment(agent_prompt=None))
-        assert "<details>" not in body
-        assert "Prompt for AI Agents" not in body
+        assert "<details>" in body
+        assert "Prompt for AI Agents" in body
+        assert "src/foo.py" in body
+        assert "Something is wrong" in body
+        assert "Preserve existing behavior and public contracts" in body
 
     def test_agent_prompt_after_suggestion(self):
         body = _format_comment_body(
@@ -511,6 +514,25 @@ class TestFormatCommentBodyAgentPrompt:
         details_end = body.index("</details>")
         details_section = body[details_start:details_end]
         assert "Apply this code change:" not in details_section
+
+    def test_task_finding_uses_compact_persian_sections_and_prompt(self):
+        body = _format_comment_body(
+            self._make_comment(
+                severity=Severity.BLOCKER,
+                source_pass="task",
+                title="تعریف تکراری متد createFood",
+                body="امضای متد دوبار تعریف شده و کامپایل را متوقف می‌کند.",
+                suggestion="متد تکراری را حذف کنید.",
+                agent_prompt="Review FoodController and remove the duplicate createFood method.",
+            )
+        )
+        assert "**🛑 بحرانی  تعریف تکراری متد createFood**" in body
+        assert "**اشکال:**" in body
+        assert "**راهکار:**" in body
+        assert "**پرامپت رفع مشکل:**" in body
+        assert "Review FoodController" in body
+        assert "<details>" not in body
+        assert "Not useful?" not in body
 
 
 class TestPostComment:

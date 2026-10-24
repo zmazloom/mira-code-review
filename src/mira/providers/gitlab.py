@@ -103,6 +103,11 @@ class GitLabProvider(BaseProvider):
     def _mr(self, pr_info: PRInfo) -> str:
         return f"{self._project(pr_info)}/merge_requests/{pr_info.number}"
 
+    def _source_project(self, pr_info: PRInfo) -> str:
+        if pr_info.source_project_id:
+            return f"{self._api}/projects/{pr_info.source_project_id}"
+        return self._project(pr_info)
+
     async def _request(
         self, method: str, url: str, *, ok: tuple[int, ...] = (200, 201), **kw: Any
     ) -> httpx.Response:
@@ -162,10 +167,37 @@ class GitLabProvider(BaseProvider):
             owner=owner,
             repo=repo,
             head_sha=mr.get("sha") or "",
+            source_project_id=mr.get("source_project_id"),
+            base_sha=(mr.get("diff_refs") or {}).get("start_sha", ""),
+            merge_base_sha=(mr.get("diff_refs") or {}).get("base_sha", ""),
             platform="gitlab",
             author=(mr.get("author") or {}).get("username", ""),
             author_avatar_url=(mr.get("author") or {}).get("avatar_url", ""),
         )
+
+    async def get_task_diff(self, pr_info: PRInfo) -> str:
+        if not pr_info.head_sha or not pr_info.source_project_id:
+            raise ProviderError("MR source project or commit is unavailable")
+        source = (await self._request("GET", self._source_project(pr_info))).json()
+        pr_info.source_owner, pr_info.source_repo = source["path_with_namespace"].rsplit("/", 1)
+        versions = await self._paginate(f"{self._mr(pr_info)}/versions")
+        version = next((v for v in versions if v.get("head_commit_sha") == pr_info.head_sha), None)
+        if version is None:
+            raise ProviderError("No immutable diff version exists for the MR head")
+        data = (await self._request("GET", f"{self._mr(pr_info)}/versions/{version['id']}")).json()
+        if (
+            data.get("head_commit_sha") != pr_info.head_sha
+            or data.get("state", "collected") != "collected"
+            or any(d.get("too_large") or d.get("collapsed") for d in data.get("diffs", []))
+        ):
+            raise ProviderError("MR diff snapshot is incomplete")
+        pr_info.base_sha = data.get("start_commit_sha", "")
+        pr_info.merge_base_sha = data.get("base_commit_sha", "")
+        pr_info.commits = [
+            {"sha": c["id"], "message": c.get("message", "")[:1000]}
+            for c in data.get("commits", [])[:100]
+        ]
+        return _build_unified_diff(data.get("diffs", []))
 
     async def _changes(self, pr_info: PRInfo) -> dict[str, Any]:
         resp = await self._request("GET", f"{self._mr(pr_info)}/changes")
@@ -194,7 +226,7 @@ class GitLabProvider(BaseProvider):
     async def get_file_content(self, pr_info: PRInfo, path: str, ref: str) -> str:
         """Raw file content at a ref — used to verify a thread's fix landed."""
         url = (
-            f"{self._project(pr_info)}/repository/files/"
+            f"{self._source_project(pr_info)}/repository/files/"
             f"{quote(path, safe='')}/raw?ref={quote(ref, safe='')}"
         )
         try:
@@ -207,7 +239,7 @@ class GitLabProvider(BaseProvider):
     async def get_repo_tree(self, pr_info: PRInfo, ref: str) -> list[str]:
         """Every file path in the repo at a ref, for JIT cross-file context."""
         url = (
-            f"{self._project(pr_info)}/repository/tree"
+            f"{self._source_project(pr_info)}/repository/tree"
             f"?recursive=true&pagination=keyset&ref={quote(ref, safe='')}"
         )
         try:
@@ -225,7 +257,7 @@ class GitLabProvider(BaseProvider):
             return {}
 
         sem = asyncio.Semaphore(8)
-        base = f"{self._project(pr_info)}/repository/commits"
+        base = f"{self._source_project(pr_info)}/repository/commits"
         headers = {"PRIVATE-TOKEN": self._token}
 
         async def _fetch_one(
@@ -238,7 +270,7 @@ class GitLabProvider(BaseProvider):
                         headers=headers,
                         params={
                             "path": path,
-                            "ref_name": pr_info.head_branch,
+                            "ref_name": pr_info.head_sha or pr_info.head_branch,
                             "per_page": max_per_file,
                         },
                     )
@@ -278,6 +310,14 @@ class GitLabProvider(BaseProvider):
         except Exception as e:
             raise ProviderError(f"Failed to load MR diff_refs: {e}") from e
         diff_refs = data.get("diff_refs") or {}
+        if result.task_review is not None:
+            if diff_refs.get("head_sha") != pr_info.head_sha:
+                raise ProviderError("MR head changed before publishing")
+            diff_refs = {
+                "base_sha": pr_info.merge_base_sha,
+                "start_sha": pr_info.base_sha,
+                "head_sha": pr_info.head_sha,
+            }
 
         posted = 0
         for comment in result.comments:
@@ -319,6 +359,9 @@ class GitLabProvider(BaseProvider):
                     posted += 1
                 except ProviderError:
                     logger.warning("Plain-note fallback also failed for %s:%s", comment.path, line)
+
+        if result.task_review is not None and posted != len(result.comments):
+            raise ProviderError("Some task review inline findings could not be published")
 
         review_body = ""
         if result.summary:
