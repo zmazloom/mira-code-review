@@ -263,6 +263,12 @@ def main() -> None:
 @click.option("--pr", "pr_url", default=None, help="PR/MR URL (GitHub PR or GitLab MR)")
 @click.option("--stdin", "use_stdin", is_flag=True, help="Read diff from stdin")
 @click.option("--model", envvar="MIRA_MODEL", default=None, help="LLM model to use")
+@click.option(
+    "--task-prompt",
+    "task_prompt",
+    default=None,
+    help="Review the repository changes against this implementation task",
+)
 @click.option("--max-comments", envvar="MIRA_MAX_COMMENTS", type=int, default=None)
 @click.option("--confidence", envvar="MIRA_CONFIDENCE_THRESHOLD", type=float, default=None)
 @click.option("--token", envvar="MIRA_GIT_TOKEN", default=None, help="Git platform API token")
@@ -304,6 +310,7 @@ def review(
     pr_url: str | None,
     use_stdin: bool,
     model: str | None,
+    task_prompt: str | None,
     max_comments: int | None,
     confidence: float | None,
     token: str | None,
@@ -335,6 +342,10 @@ def review(
         raise click.UsageError("Provide <PR_OR_MR_URL>, --pr <url>, or --stdin")
     if target_url and use_stdin:
         raise click.UsageError("A PR/MR URL cannot be combined with --stdin")
+    if task_prompt and not target_url:
+        raise click.UsageError(
+            "--task-prompt requires a PR/MR URL; task-aware review needs repository access"
+        )
     if post and dry_run:
         raise click.UsageError("--post and --dry-run are incompatible")
     if (summary_only or no_inline) and not post:
@@ -382,12 +393,19 @@ def review(
                 github_token=github_token,
                 gitlab_token=gitlab_token,
             )
+            task_options = None
+            if task_prompt:
+                from mira.core.task_review import TaskReviewOptions
+
+                task_options = TaskReviewOptions(post_comments=post)
             command = ManualReviewCommand(
                 config=config,
                 provider=provider,
                 post=post,
                 post_inline_comments=not (summary_only or no_inline),
                 model_override=model,
+                task_prompt=task_prompt,
+                task_options=task_options,
             )
             outcome = asyncio.run(command.execute(reference))
             result = outcome.result

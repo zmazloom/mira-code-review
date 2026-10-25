@@ -195,9 +195,11 @@ expiration; apply the same access, backup, and retention policy as dashboard dat
 
 Task-aware jobs do not advance standard incremental-review or review-rest
 checkpoints. Existing APIs, webhook reviews, `mira review`, and `mira review-notif`
-remain available. The CLI stays read-only by default; the dashboard's standard
-option retains its existing Notif MR title gate. No dependencies or deployment
-configuration changes are needed.
+remain available. The CLI stays read-only by default. Pass `--task-prompt` to
+`mira review` to run this task-aware flow from the terminal; add `--post` to
+publish findings to the PR/MR. The dashboard's standard option retains its
+existing Notif MR title gate. No dependencies or deployment configuration
+changes are needed.
 
 Provider contracts follow the official [GitHub compare API](https://docs.github.com/en/rest/commits/commits#compare-two-commits)
 and [GitLab diff-version API](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request-diff-version).
@@ -214,6 +216,20 @@ affected caller is found. Unsupported/excluded files, provider limits, truncated
 content, resource budgets, and unresolved requirements can prevent verification.
 
 ## Commands
+
+Run a task-aware review from the terminal. Posting is opt-in, just like regular
+CLI reviews:
+
+```bash
+mira review https://github.com/org/repo/pull/123 \
+  --task-prompt "Implement a complete CRUD service for event assignments."
+mira review https://github.com/org/repo/pull/123 \
+  --task-prompt "Implement a complete CRUD service for event assignments." \
+  --post
+```
+
+The first command prints findings without remote writes. The second publishes
+task findings as PR/MR review comments using the configured Git provider token.
 
 Start the existing Mira server with its usual credentials/configuration and sign
 in. Save the request above as `task-review.json` and use an authenticated cookie jar:
