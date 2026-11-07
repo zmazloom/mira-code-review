@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 import httpx
 
+from mira.observability import http_request
 from mira.platforms import profiles
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,7 @@ class GitHubRepoFetcher:
         url = f"{self._api}/repos/{owner}/{repo}"
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(url, headers=self._headers(), timeout=15)
+                resp = await http_request(client, 'get', 'repository', url, headers=self._headers(), timeout=15)
                 resp.raise_for_status()
                 return str(resp.json().get("default_branch", "main"))
         except Exception as exc:
@@ -116,7 +117,7 @@ class GitHubRepoFetcher:
     async def repo_tree(self, owner: str, repo: str, branch: str) -> list[str]:
         url = f"{self._api}/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
         async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=self._headers(), timeout=30)
+            resp = await http_request(client, 'get', 'repository', url, headers=self._headers(), timeout=30)
             # GitHub returns 409 (and sometimes 404) for an empty repo.
             if resp.status_code in (404, 409):
                 raise EmptyRepoError(owner, repo)
@@ -133,7 +134,7 @@ class GitHubRepoFetcher:
         async def _fetch() -> str | None:
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(url, headers=headers, timeout=30)
+                    resp = await http_request(client, 'get', 'repository', url, headers=headers, timeout=30)
                     if resp.status_code == 404:
                         return None
                     resp.raise_for_status()
@@ -159,7 +160,7 @@ class GitHubRepoFetcher:
         headers = {**self._headers(), "User-Agent": "mira-indexer"}
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
-                resp = await client.get(url, headers=headers)
+                resp = await http_request(client, 'get', 'repository', url, headers=headers)
                 if resp.status_code != 200:
                     logger.warning(
                         "Tarball fetch failed for %s/%s: %d", owner, repo, resp.status_code
@@ -197,7 +198,7 @@ class GitLabRepoFetcher:
     async def default_branch(self, owner: str, repo: str) -> str:
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(
+                resp = await http_request(client, 'get', 'repository',
                     self._project(owner, repo), headers=self._headers(), timeout=15
                 )
                 resp.raise_for_status()
@@ -215,7 +216,7 @@ class GitLabRepoFetcher:
         paths: list[str] = []
         async with httpx.AsyncClient() as client:
             while url:
-                resp = await client.get(url, headers=self._headers(), timeout=30)
+                resp = await http_request(client, 'get', 'repository', url, headers=self._headers(), timeout=30)
                 # An empty repo (or a ref that doesn't exist yet) 404s.
                 if resp.status_code == 404:
                     raise EmptyRepoError(owner, repo)
@@ -234,7 +235,7 @@ class GitLabRepoFetcher:
         async def _fetch() -> str | None:
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(url, headers=self._headers(), timeout=30)
+                    resp = await http_request(client, 'get', 'repository', url, headers=self._headers(), timeout=30)
                     if resp.status_code == 404:
                         return None
                     resp.raise_for_status()
@@ -259,7 +260,7 @@ class GitLabRepoFetcher:
         url = f"{self._project(owner, repo)}/repository/archive.tar.gz?sha={ref}"
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
-                resp = await client.get(url, headers=self._headers())
+                resp = await http_request(client, 'get', 'repository', url, headers=self._headers())
                 if resp.status_code != 200:
                     logger.warning(
                         "Tarball fetch failed for %s/%s: %d", owner, repo, resp.status_code
@@ -292,7 +293,7 @@ class ForgejoRepoFetcher:
     async def default_branch(self, owner: str, repo: str) -> str:
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(
+                resp = await http_request(client, 'get', 'repository',
                     self._repo(owner, repo), headers=self._headers(), timeout=15
                 )
                 resp.raise_for_status()
@@ -308,7 +309,7 @@ class ForgejoRepoFetcher:
             page = 1
             while True:
                 page_url = f"{url}&page={page}" if page > 1 else url
-                resp = await client.get(page_url, headers=self._headers(), timeout=30)
+                resp = await http_request(client, 'get', 'repository', page_url, headers=self._headers(), timeout=30)
                 if resp.status_code == 404:
                     raise EmptyRepoError(owner, repo)
                 resp.raise_for_status()
@@ -331,7 +332,7 @@ class ForgejoRepoFetcher:
         async def _fetch() -> str | None:
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(url, headers=self._headers(), timeout=30)
+                    resp = await http_request(client, 'get', 'repository', url, headers=self._headers(), timeout=30)
                     if resp.status_code == 404:
                         return None
                     resp.raise_for_status()
@@ -358,7 +359,7 @@ class ForgejoRepoFetcher:
         url = f"{self._repo(owner, repo)}/archive/{ref}.tar.gz"
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=120) as client:
-                resp = await client.get(url, headers=self._headers())
+                resp = await http_request(client, 'get', 'repository', url, headers=self._headers())
                 if resp.status_code != 200:
                     logger.warning(
                         "Tarball fetch failed for %s/%s: %d", owner, repo, resp.status_code

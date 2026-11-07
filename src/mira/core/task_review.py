@@ -37,6 +37,7 @@ from mira.llm.response_parser import LLMComment, loads_lenient
 from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.localization import append_language_instruction
 from mira.models import FileChangeType, FileDiff, HunkInfo, ReviewComment, ReviewResult, Severity
+from mira.observability import traced
 from mira.providers.formatting import format_comment_body
 
 
@@ -167,7 +168,27 @@ class TaskReviewSession:
     ):
         self.prompt = prompt
         self.options = options
-        self.progress = progress or (lambda phase: None)
+
+        def report_progress(phase: str) -> None:
+            from mira.observability import event
+
+            messages = {
+                "extracting_requirements": "Understanding the task requirements.",
+                "retrieving_context": "Gathering repository context.",
+                "reviewing": "Reviewing the code changes.",
+                "verifying_requirements": "Verifying the task requirements.",
+                "publishing": "Publishing review results.",
+            }
+            event(
+                "task.progress",
+                "Task review phase changed",
+                phase=phase,
+                user_message=messages.get(phase, "Continuing the review."),
+            )
+            if progress:
+                progress(phase)
+
+        self.progress = report_progress
         self.model_identity: dict = {}
         self.requirements: list[Requirement] = [Requirement(id="R1", description=prompt)]
         self.limitations: list[str] = []
@@ -255,6 +276,7 @@ class TaskReviewSession:
         finally:
             self.pending.pop(path, None)
 
+    @traced("task.prepare", "Understanding the task and gathering evidence.", review=False)
     async def prepare(self, engine, pr_info, diff: str) -> None:
         self.pr_info = pr_info
         # Fail closed on invalid trusted policy before spending tokens.
@@ -476,6 +498,7 @@ class TaskReviewSession:
             lines[evidence.start_line - 1 : evidence.end_line]
         )
 
+    @traced("task.assess", "Verifying the task requirements.", review=False)
     async def assess(self, engine, result: ReviewResult, diff: str) -> None:
         self.budget.verification_started = True
         self.progress("verifying_requirements")
@@ -766,6 +789,7 @@ class TaskReviewSession:
             else {"status": "not_evaluated", "compared_files": []},
         }
 
+    @traced("task.publish", "Preparing the review results for publishing.", review=False)
     async def publish(self, engine, result: ReviewResult) -> str:
         result.comments = [ensure_agent_prompt(comment) for comment in result.comments]
         result.repository_comments = [
@@ -822,7 +846,8 @@ class TaskReviewSession:
 
 
 def _drop_already_posted_task_findings(
-    comments: list[ReviewComment], threads: list,
+    comments: list[ReviewComment],
+    threads: list,
 ) -> list[ReviewComment]:
     """Suppress only matching findings, allowing distinct issues on one line."""
     kept = []
@@ -834,10 +859,7 @@ def _drop_already_posted_task_findings(
             and comment.line <= thread.line <= end
             and (
                 comment.title.casefold() in (thread.body or "").casefold()
-                or _jaccard_similarity(
-                    f"{comment.title} {comment.body}", thread.body or ""
-                )
-                >= 0.18
+                or _jaccard_similarity(f"{comment.title} {comment.body}", thread.body or "") >= 0.18
             )
             for thread in threads
         )

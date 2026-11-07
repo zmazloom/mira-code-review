@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mira.config import MiraConfig
 from mira.exceptions import ConfigError
+from mira.observability import traced
 
 
 def _display_name(configured_path: str) -> str:
@@ -21,6 +22,7 @@ def _resolve_path(config: MiraConfig, configured_path: str, field: str) -> Path:
     return base_dir / path
 
 
+@traced('rules.load', 'Loading company review rules.', review=False)
 def load_company_rules(config: MiraConfig) -> list[dict[str, str]]:
     """Read configured UTF-8 policy files as ordered, unparsed rule blocks.
 

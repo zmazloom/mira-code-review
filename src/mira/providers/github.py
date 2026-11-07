@@ -25,6 +25,7 @@ from mira.models import (
     ReviewResult,
     UnresolvedThread,
 )
+from mira.observability import http_request, retry_started
 from mira.providers.base import BaseProvider
 
 # Shared comment-formatting helpers (re-exported for back-compat — callers and
@@ -43,6 +44,7 @@ _RETRYABLE = (ConnectionError, TimeoutError, httpx.TransportError, GithubExcepti
 logger = logging.getLogger(__name__)
 
 _retry_transient = retry(
+    before=retry_started,
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=30),
     retry=retry_if_exception_type(_RETRYABLE),
@@ -189,6 +191,9 @@ class GitHubProvider(BaseProvider):
         if not token:
             raise ProviderError("GitHub token is required")
         self._github = Github(token)
+        from mira.observability import trace_github_requester
+
+        trace_github_requester(self._github._Github__requester)
         self._token = token
 
     async def get_pr_info(self, pr_url: str) -> PRInfo:
@@ -232,7 +237,9 @@ class GitHubProvider(BaseProvider):
             raise ProviderError("PR source repository or commit is unavailable")
         url = f"{_GITHUB_API_URL}/repos/{pr_info.owner}/{pr_info.repo}/compare/{pr_info.base_sha}...{pr_info.head_sha}"
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers={"Authorization": f"token {self._token}"})
+            response = await http_request(
+                client, "get", "github", url, headers={"Authorization": f"token {self._token}"}
+            )
             response.raise_for_status()
             data = response.json()
         pr_info.merge_base_sha = data["merge_base_commit"]["sha"]
@@ -252,7 +259,9 @@ class GitHubProvider(BaseProvider):
         @_retry_transient
         async def _fetch_diff() -> str:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(diff_url, headers=headers, follow_redirects=True)
+                resp = await http_request(
+                    client, "get", "github", diff_url, headers=headers, follow_redirects=True
+                )
                 if resp.status_code == 406:
                     # GitHub 406s once a PR diff exceeds its ~20,000-line cap.
                     # Fall back to per-file patches from the files API.
@@ -291,7 +300,10 @@ class GitHubProvider(BaseProvider):
         files: list[dict[str, Any]] = []
         page = 1
         while True:
-            resp = await client.get(
+            resp = await http_request(
+                client,
+                "get",
+                "github",
                 files_url,
                 headers=headers,
                 params={"per_page": 100, "page": page},
@@ -349,7 +361,9 @@ class GitHubProvider(BaseProvider):
         @_retry_transient
         async def _fetch() -> str:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(url, headers=headers, follow_redirects=True)
+                resp = await http_request(
+                    client, "get", "github", url, headers=headers, follow_redirects=True
+                )
                 resp.raise_for_status()
                 return resp.text
 
@@ -640,7 +654,10 @@ class GitHubProvider(BaseProvider):
     async def _graphql_request(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         """Execute a GraphQL request against the GitHub API."""
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
+            resp = await http_request(
+                client,
+                "post",
+                "github",
                 _GRAPHQL_URL,
                 json={"query": query, "variables": variables},
                 headers={
@@ -856,7 +873,9 @@ class GitHubProvider(BaseProvider):
         @_retry_transient
         async def _fetch() -> list[str]:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(url, headers=headers, follow_redirects=True)
+                resp = await http_request(
+                    client, "get", "github", url, headers=headers, follow_redirects=True
+                )
                 resp.raise_for_status()
                 data = resp.json()
             if data.get("truncated"):
@@ -880,8 +899,14 @@ class GitHubProvider(BaseProvider):
         @_retry_transient
         async def _fetch() -> str:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    url, headers=headers, params={"ref": ref}, follow_redirects=True
+                resp = await http_request(
+                    client,
+                    "get",
+                    "github",
+                    url,
+                    headers=headers,
+                    params={"ref": ref},
+                    follow_redirects=True,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -1066,7 +1091,10 @@ class GitHubProvider(BaseProvider):
         ) -> tuple[str, list[FileHistoryEntry]]:
             async with sem:
                 try:
-                    resp = await client.get(
+                    resp = await http_request(
+                        client,
+                        "get",
+                        "github",
                         base,
                         headers=headers,
                         params={

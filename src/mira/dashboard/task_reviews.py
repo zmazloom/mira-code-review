@@ -142,6 +142,16 @@ def structured_result(command, result) -> dict:
 
 
 async def _run(job: jobs.Job, body: TaskReviewRequest, reference) -> None:
+    from mira.observability import event, review_execution
+
+    with review_execution("task_aware", job.result.id):
+        await _run_impl(job, body, reference)
+        if job.result.status == "failed":
+            event("review.failed", "Task review failed", level="ERROR",
+                  user_message="Code review failed or was interrupted.")
+
+
+async def _run_impl(job: jobs.Job, body: TaskReviewRequest, reference) -> None:
     status = cast(TaskReviewStatus, job.result)
     started = time.monotonic()
     command = None
@@ -162,8 +172,11 @@ async def _run(job: jobs.Job, body: TaskReviewRequest, reference) -> None:
             task_progress=progress,
             add_description=job.add_description,
         )
-        async with asyncio.timeout(body.review_options.max_seconds):
-            outcome = await command.execute(reference)
+        from mira.observability import review_execution
+
+        with review_execution("task_aware", status.id):
+            async with asyncio.timeout(body.review_options.max_seconds):
+                outcome = await command.execute(reference)
         status.result = structured_result(command, outcome.result)
         status.publishing_status = (outcome.result.task_review or {}).get(
             "publishing_status", "unknown"
@@ -271,3 +284,11 @@ async def task_review_findings(review_id: str, request: Request) -> dict:
         "publishing_status": status.publishing_status,
         "errors": status.errors,
     }
+
+
+@router.get("/{review_id}/logs")
+async def task_review_logs(review_id: str, request: Request) -> dict:
+    await task_review_status(review_id, request)
+    from mira.observability import read_events
+
+    return {"review_id": review_id, "events": read_events(review_id)}

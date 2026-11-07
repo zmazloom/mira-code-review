@@ -107,7 +107,7 @@ class DashboardManualReviewTests(unittest.IsolatedAsyncioTestCase):
         def run_cli(command, **kwargs):
             result = CliRunner().invoke(main, command[3:])
             self.assertEqual(result.exit_code, 0, result.output)
-            return SimpleNamespace(returncode=result.exit_code, stdout=result.output)
+            return SimpleNamespace(returncode=result.exit_code, stdout=result.stdout, stderr=result.stderr)
 
         job = reviews.Job(owner=1, result=reviews.ReviewStatus(
             id="cli", platform="github", url="https://github.com/owner/repo/pull/1", model="company-model"))

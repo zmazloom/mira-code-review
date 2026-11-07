@@ -26,8 +26,10 @@ class EventBus:
     def __init__(self) -> None:
         self._subscribers: set[asyncio.Queue[Event]] = set()
         self._lock = asyncio.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def subscribe(self) -> asyncio.Queue[Event]:
+        self._loop = asyncio.get_running_loop()
         q: asyncio.Queue[Event] = asyncio.Queue(maxsize=100)
         async with self._lock:
             self._subscribers.add(q)
@@ -42,8 +44,9 @@ class EventBus:
         event = Event(type=event_type, data=data or {})
         # Use create_task so sync callers don't need await
         try:
-            loop = asyncio.get_event_loop()
-            loop.create_task(self._broadcast(event))
+            loop = self._loop
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(lambda: loop.create_task(self._broadcast(event)))
         except RuntimeError:
             # No running loop (called from sync context) — best effort
             pass

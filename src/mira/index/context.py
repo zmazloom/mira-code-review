@@ -12,6 +12,7 @@ from typing import Protocol, runtime_checkable
 from mira.index.extract import extract_symbols, find_symbol_by_name
 from mira.index.store import IndexStore
 from mira.models import PRInfo
+from mira.observability import traced
 from mira.providers.base import BaseProvider
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ _CHARS_PER_TOKEN = 4  # conservative estimate
 class SourceFetcher(Protocol):
     """Protocol for fetching source code from a repository."""
 
+    @traced("source.fetch", None, review=False)
     async def fetch(self, path: str) -> str | None:
         """Fetch the content of a file. Returns None on failure."""
         ...
@@ -38,6 +40,7 @@ class ProviderSourceFetcher:
         self._ref = ref
         self._cache: dict[str, str | None] = {}
 
+    @traced("source.fetch", None, review=False)
     async def fetch(self, path: str) -> str | None:
         if (
             not path
@@ -59,6 +62,7 @@ class ProviderSourceFetcher:
             return None
 
 
+@traced("context.retrieve", None, review=False)
 async def build_code_context(
     changed_paths: list[str],
     store: IndexStore,

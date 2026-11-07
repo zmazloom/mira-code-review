@@ -8,6 +8,8 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from mira.observability import traced
+
 if TYPE_CHECKING:
     from mira.core.task_review import TaskReviewSession
     from mira.llm.base import LLMProviderProtocol
@@ -437,6 +439,7 @@ class ReviewEngine:
         await self.provider.post_comment(pr_info, placeholder)
         return await self.provider.find_bot_comment(pr_info, WALKTHROUGH_MARKER)
 
+    @traced("review.description", "Summarizing the changes.", review=False)
     async def _generate_change_description(self, diff_text: str) -> str:
         """Generate the optional compact Persian PR/MR description comment."""
         clipped_diff = diff_text[:12_000]
@@ -487,6 +490,7 @@ class ReviewEngine:
             f"**Message:** {message}"
         )
 
+    @traced("review.overlaps", "Checking related changes.", review=False)
     async def _detect_overlaps_safe(
         self,
         pr_info: PRInfo,
@@ -565,6 +569,7 @@ class ReviewEngine:
             logger.warning("Overlap detection failed, continuing: %s", exc)
             return []
 
+    @traced("review", None, review=True)
     async def review_pr(self, pr_url: str) -> ReviewResult:
         """Full pipeline: fetch PR -> review -> post results.
 
@@ -574,6 +579,26 @@ class ReviewEngine:
         import time as _time
 
         _review_start = _time.monotonic()
+
+        from mira.observability import event
+
+        event(
+            "configuration.loaded",
+            "Review configuration ready",
+            dry_run=self.dry_run,
+            post_inline_comments=self.post_inline_comments,
+        )
+        event(
+            "model.selected",
+            "Review model ready",
+            model=self.config.llm.model,
+            provider=self.config.llm.provider,
+        )
+        event(
+            "authentication.initialized",
+            "Code hosting client ready",
+            component=type(self.provider).__module__,
+        )
 
         if not self.provider:
             raise RuntimeError("A provider is required for PR review")
@@ -1109,10 +1134,12 @@ class ReviewEngine:
 
         return result
 
+    @traced("review", None, review=True)
     async def review_diff(self, diff_text: str) -> ReviewResult:
         """Review a diff from stdin — no provider needed."""
         return await self._review_diff_internal(diff_text)
 
+    @traced("review.analyze", "Reviewing the code changes.", review=False)
     async def _review_diff_internal(
         self,
         diff_text: str,
@@ -1224,6 +1251,7 @@ class ReviewEngine:
 
         filtered = selected
 
+        @traced("review.walkthrough", "Preparing the change summary.", review=False)
         async def _generate_walkthrough() -> WalkthroughResult | None:
             if not self.config.review.walkthrough:
                 return None
@@ -1241,6 +1269,7 @@ class ReviewEngine:
                 logger.warning("Walkthrough generation failed, skipping: %s", exc)
                 return None
 
+        @traced("review.context", "Gathering repository context.", review=False)
         async def _build_context() -> str:
             if self.task_session is not None:
                 context = self.task_session.context

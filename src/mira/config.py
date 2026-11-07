@@ -14,6 +14,7 @@ import yaml
 from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 from mira.exceptions import ConfigError
+from mira.observability import traced
 
 logger = logging.getLogger(__name__)
 
@@ -407,6 +408,7 @@ def _record_rules_origins(
             origins[field] = origin
 
 
+@traced("configuration.load", None, review=False)
 def load_config(
     config_path: Path | str | None = None,
     overrides: dict[str, Any] | None = None,

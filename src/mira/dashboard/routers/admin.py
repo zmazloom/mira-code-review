@@ -32,6 +32,17 @@ from mira.dashboard.api import (
 from mira.index.store import IndexStore
 
 
+@router.get("/admin/review-logs/{review_id}")
+async def admin_review_logs(review_id: str, request: Request) -> dict:
+    _require_admin(request)
+    from mira.observability import read_events
+
+    try:
+        return {"review_id": review_id, "events": read_events(review_id, "admin")}
+    except ValueError:
+        raise HTTPException(422, "Invalid review ID") from None
+
+
 async def _sync_platform_repos(
     platform: str, env_token: str, auth_class, backfill_fn, default_base_url: str, env_api_url: str
 ) -> dict:

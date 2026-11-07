@@ -11,6 +11,9 @@ def create_llm(config: LLMConfig) -> LLMProviderProtocol:
 
     Returns an instance satisfying LLMProviderProtocol.
     """
+    from mira.observability import event
+
+    event("model.selected", "Selected language model", model=config.model, provider=config.provider)
     if config.provider == "bedrock":
         from mira.llm.bedrock import BedrockProvider
 

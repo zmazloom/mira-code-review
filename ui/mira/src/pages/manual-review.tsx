@@ -52,6 +52,7 @@ export function ManualReviewPage() {
   const [defaultModel, setDefaultModel] = useState("")
   const [modelsLoading, setModelsLoading] = useState(true)
   const [job, setJob] = useState<ReviewJob | null>(null)
+  const [progress, setProgress] = useState<{ timestamp: string; event: string; message: string }[]>([])
   const [pendingId, setPendingId] = useState<string | null>(() => sessionStorage.getItem(storageKey))
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -82,6 +83,10 @@ export function ManualReviewPage() {
         if (cancelled) return
         failures = 0
         setJob(result)
+        try {
+          const logs = await fetchJson<{ events: typeof progress }>(`${endpoint}/logs`)
+          if (!cancelled) setProgress(logs.events)
+        } catch { /* Progress storage can be unavailable while the review continues. */ }
         setMode(taskAware ? "TASK_AWARE" : "STANDARD")
         setPlatform(result.platform)
         setUrl(result.url)
@@ -116,6 +121,7 @@ export function ManualReviewPage() {
     setStarting(true)
     setError(null)
     setJob(null)
+    setProgress([])
     try {
       const taskAware = mode === "TASK_AWARE"
       const result = await postJson<ReviewJob>(taskAware ? "/api/reviews/task-aware" : "/api/manual-reviews", taskAware ? {
@@ -215,7 +221,11 @@ export function ManualReviewPage() {
               {job.message}
             </p>}
             {error && <p role="alert" className="text-destructive">{error}</p>}
-            {job?.status === "reviewing" && job.phase && <p className="text-muted-foreground">{job.phase.replaceAll("_", " ")}</p>}
+            {progress.length > 0 && <div aria-live="polite" className="space-y-1 text-sm text-muted-foreground">
+              {progress.slice(-8).map((entry, index) => <p key={`${entry.timestamp}-${index}`}>
+                <time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleTimeString()}</time>{" "}{entry.message}
+              </p>)}
+            </div>}
             {job?.status === "failed" && <p className="text-muted-foreground">Check the request for comments before retrying.</p>}
             {job?.result && <div className="space-y-4 border-t pt-4">
               <p className="break-all">Reviewed commit: <code>{job.result.reviewed_commit_sha || "Unavailable"}</code></p>

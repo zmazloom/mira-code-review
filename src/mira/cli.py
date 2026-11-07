@@ -24,6 +24,7 @@ from mira.manual_review import (
     parse_pull_request_reference,
 )
 from mira.models import ReviewResult, Severity
+from mira.observability import traced
 
 
 def _format_text(result: ReviewResult) -> str:
@@ -120,6 +121,7 @@ def _format_json(result: ReviewResult) -> str:
         }
 
     data = {
+        "review_id": result.review_id,
         "summary": result.summary,
         "walkthrough": walkthrough_data,
         "comments": [
@@ -305,6 +307,7 @@ def main() -> None:
     help="Skip walkthrough generation. Useful in dry-run loops where only the "
     "inline review is needed and the extra LLM call should be saved.",
 )
+@traced("review", review=True)
 def review(
     url: str | None,
     pr_url: str | None,
@@ -332,7 +335,7 @@ def review(
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.WARNING,
         format="%(name)s %(levelname)s: %(message)s",
-        stream=sys.stdout,
+        stream=sys.stderr,
     )
 
     if url and pr_url:
@@ -439,6 +442,7 @@ def review(
 @click.option("--gitlab-token", envvar="GITLAB_TOKEN", default=None)
 @click.option("--output", "output_format", type=click.Choice(["text", "json"]), default="text")
 @click.option("--add-description", is_flag=True, help="Post a short Persian change description first.")
+@traced("review", review=True)
 def review_notif(
     url: str, model: str | None, config_path: str | None,
     token: str | None, github_token: str | None, gitlab_token: str | None,

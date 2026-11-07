@@ -22,6 +22,7 @@ from mira.llm.prompts.review import build_conversation_prompt
 from mira.llm.tool_schemas import SUBMIT_THREAD_REPLY_TOOL
 from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.localization import append_language_instruction, is_persian
+from mira.observability import traced
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ def _help_message(bot_name: str) -> str:
     )
 
 
+@traced("review", None, review=True)
 async def run_pr_review(
     provider: Any,
     owner: str,

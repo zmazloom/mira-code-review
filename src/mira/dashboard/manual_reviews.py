@@ -98,6 +98,7 @@ async def _run(job: Job) -> None:
             text=True,
             timeout=3600,
             check=False,
+            env={**os.environ, "MIRA_REVIEW_ID": job.result.id},
         )
         # CLI exit code 1 also means a completed review found blockers.
         # Only the structured posting result proves completion in that case.
@@ -247,3 +248,11 @@ async def review_status(job_id: str, request: Request) -> ReviewStatus:
     if job is None or job.owner != owner:
         raise HTTPException(404, "Review not found. The server may have restarted.")
     return job.result
+
+
+@router.get("/{job_id}/logs")
+async def review_logs(job_id: str, request: Request, limit: int = Query(500, ge=1, le=2000)) -> dict:
+    await review_status(job_id, request)
+    from mira.observability import read_events
+
+    return {"review_id": job_id, "events": read_events(job_id, limit=limit)}

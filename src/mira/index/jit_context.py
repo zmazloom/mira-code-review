@@ -20,6 +20,7 @@ from pathlib import PurePosixPath
 
 from mira.index.extract import extract_symbols
 from mira.models import FileDiff
+from mira.observability import traced
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +391,7 @@ def _trim_symbol(source: str, max_chars: int) -> str:
     return truncated + "\n    # ... (truncated)"
 
 
+@traced("context.jit", None, review=False)
 async def build_jit_cross_file_context(
     changed_files: list[FileDiff],
     source_fetcher,  # SourceFetcher

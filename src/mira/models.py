@@ -480,6 +480,7 @@ class ReviewResult:
     repository_comments: list[ReviewComment] = field(default_factory=list)
     # Optional short Persian change description requested by the API caller.
     change_description: str = ""
+    review_id: str = ""
 
 
 @dataclass

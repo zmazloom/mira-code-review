@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from mira.index.context import SourceFetcher
+from mira.observability import traced
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,7 @@ class AgenticToolExecutor:
     exposed_paths: set[str] = field(default_factory=set)
     on_truncation: Callable[[], None] | None = None
 
+    @traced("tool.execute", None, review=False)
     async def execute(self, name: str, args: dict) -> str:
         """Dispatch a tool call. Returns the tool result as a string.
 

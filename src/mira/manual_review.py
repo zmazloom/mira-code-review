@@ -13,6 +13,7 @@ from mira.dashboard.models_config import llm_config_for
 from mira.exceptions import MiraError
 from mira.llm import create_llm
 from mira.models import PRInfo, ReviewResult
+from mira.observability import traced
 from mira.providers import create_provider
 from mira.providers.base import BaseProvider
 
@@ -138,6 +139,7 @@ def parse_pull_request_reference(value: str) -> PullRequestReference:
     )
 
 
+@traced("authentication.initialize", "Connecting to the code hosting service.", review=False)
 def create_manual_provider(
     reference: PullRequestReference,
     *,
@@ -210,6 +212,7 @@ class ManualReviewCommand:
         self.task_progress = task_progress
         self.add_description = add_description
 
+    @traced("review", None, review=True)
     async def execute(self, reference: PullRequestReference) -> ManualReviewOutcome:
         """Construct configured LLMs and delegate the full review to ``ReviewEngine``."""
 
@@ -265,6 +268,7 @@ class ManualReviewCommand:
 class NotifReviewCommand(ManualReviewCommand):
     """Check the request title before creating LLMs or running a review."""
 
+    @traced("review", None, review=True)
     async def execute_if_matching(
         self,
         reference: PullRequestReference,

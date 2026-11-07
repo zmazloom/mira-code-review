@@ -187,9 +187,11 @@ class BedrockProvider:
 
         logger.debug("Bedrock request: model=%s, messages=%d", model, len(conversation))
 
-        loop = asyncio.get_running_loop()
+        from mira.observability import operation
+
         try:
-            response = await loop.run_in_executor(None, lambda: self._client.converse(**kwargs))
+            with operation("llm.bedrock.converse", model=model):
+                response = await asyncio.to_thread(self._client.converse, **kwargs)
         except Exception as e:
             self._handle_api_error(e, model)
             raise  # unreachable, but satisfies type checkers

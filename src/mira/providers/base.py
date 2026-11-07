@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+import inspect
 
 from mira.models import (
     BotThreadRecord,
@@ -12,10 +13,22 @@ from mira.models import (
     ReviewResult,
     UnresolvedThread,
 )
+from mira.observability import traced
 
 
 class BaseProvider(abc.ABC):
     """Abstract base class for code hosting providers."""
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        for name, method in list(vars(cls).items()):
+            if not name.startswith("_") and inspect.iscoroutinefunction(method):
+                message = (
+                    "Publishing review results."
+                    if name in {"post_review", "post_comment"}
+                    else None
+                )
+                setattr(cls, name, traced(f"provider.{name}", message)(method))
 
     @abc.abstractmethod
     def __init__(self, token: str) -> None:

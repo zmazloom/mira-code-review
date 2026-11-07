@@ -30,6 +30,7 @@ from mira.models import (
     ReviewResult,
     UnresolvedThread,
 )
+from mira.observability import http_request
 from mira.platforms import profiles
 from mira.providers.base import BaseProvider
 from mira.providers.formatting import format_comment_body
@@ -79,7 +80,9 @@ class ForgejoProvider(BaseProvider):
     ) -> httpx.Response:
         headers = {"Authorization": f"token {self._token}", **kw.pop("headers", {})}
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.request(method, url, headers=headers, **kw)
+            resp = await http_request(
+                client, method, "forgejo", url, use_request=True, headers=headers, **kw
+            )
         if resp.status_code not in ok:
             err = ProviderError(f"Forgejo {method} {url} → {resp.status_code}: {resp.text[:300]}")
             err.status_code = resp.status_code  # type: ignore[attr-defined]
@@ -91,7 +94,13 @@ class ForgejoProvider(BaseProvider):
         next_url: str | None = url + ("&" if "?" in url else "?") + "limit=100"
         async with httpx.AsyncClient(timeout=30) as client:
             while next_url:
-                resp = await client.get(next_url, headers={"Authorization": f"token {self._token}"})
+                resp = await http_request(
+                    client,
+                    "get",
+                    "forgejo",
+                    next_url,
+                    headers={"Authorization": f"token {self._token}"},
+                )
                 resp.raise_for_status()
                 out.extend(resp.json())
                 next_url = _next_link(resp.headers.get("link", ""))
@@ -226,7 +235,10 @@ class ForgejoProvider(BaseProvider):
         ) -> tuple[str, list[FileHistoryEntry]]:
             async with sem:
                 try:
-                    resp = await client.get(
+                    resp = await http_request(
+                        client,
+                        "get",
+                        "forgejo",
                         base,
                         headers=headers,
                         params={

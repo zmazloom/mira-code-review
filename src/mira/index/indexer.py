@@ -19,6 +19,7 @@ from mira.index.manifests import is_manifest, parse_manifest
 from mira.index.store import DirectorySummary, ExternalRef, FileSummary, IndexStore, SymbolInfo
 from mira.llm import create_llm
 from mira.llm.utils import strip_think_blocks
+from mira.observability import traced
 from mira.platforms.fetch import RepoFetcher, make_fetcher
 
 logger = logging.getLogger(__name__)
@@ -407,6 +408,7 @@ async def _summarize_batch(
     return results
 
 
+@traced("repository.index", "Indexing repository files.", review=False)
 async def index_repo(
     owner: str,
     repo: str,
@@ -878,6 +880,7 @@ async def _refresh_manifests_incremental(
     return touched
 
 
+@traced("repository.index_diff", None, review=False)
 async def index_diff(
     owner: str,
     repo: str,

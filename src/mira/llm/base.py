@@ -13,6 +13,7 @@ from mira.config import LLMConfig
 from mira.exceptions import LLMError, NonRetriableLLMError
 from mira.llm import provider_profiles as profiles
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
+from mira.observability import retry_started
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,7 @@ class OpenAICompatibleProvider:
         # Apply retry decorator imperatively so it reads config values
         # (max_retries, retry_min_wait, retry_max_wait) at instance time.
         self._retry = retry(
+            before=retry_started,
             stop=stop_after_attempt(config.max_retries),
             wait=wait_exponential(
                 multiplier=1,

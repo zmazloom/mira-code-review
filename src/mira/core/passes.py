@@ -28,10 +28,12 @@ from mira.llm.response_parser import (
 from mira.llm.tool_schemas import SUBMIT_CRITIQUE_TOOL, SUBMIT_REVIEW_TOOL
 from mira.localization import append_language_instruction, is_persian
 from mira.models import KeyIssue, ReviewComment, Severity
+from mira.observability import traced
 
 logger = logging.getLogger(__name__)
 
 
+@traced("review.investigate", "Investigating the code and its dependencies.", review=False)
 async def agentic_review_loop(
     llm: LLMProvider,
     messages: list[dict],
@@ -144,6 +146,7 @@ def _security_llm(fallback: LLMProvider) -> LLMProvider:
         return fallback
 
 
+@traced("review.security", "Checking for security issues.", review=False)
 async def security_review_pass(
     llm: LLMProvider,
     files: list,
@@ -256,6 +259,7 @@ async def _security_scan_once(
     return comments
 
 
+@traced("review.dependencies", "Checking dependency changes.", review=False)
 async def dependency_review_pass(
     llm: LLMProvider,
     manifest_files: list,
@@ -367,6 +371,7 @@ def _critique_keep(verdict: dict, comment: ReviewComment) -> bool:
     return verdict.get("keep") is True
 
 
+@traced("review.validate", "Validating the review findings.", review=False)
 async def self_critique(
     llm: LLMProvider,
     comments: list[ReviewComment],
@@ -522,6 +527,7 @@ async def self_critique(
     return [c for i, c in enumerate(comments) if i in keep_indices]
 
 
+@traced("review.summary", "Finalizing the review summary.", review=False)
 async def regenerate_summary(
     llm: LLMProvider,
     comments: list[ReviewComment],
