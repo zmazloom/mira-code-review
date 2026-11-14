@@ -4,6 +4,24 @@ from __future__ import annotations
 
 from mira.config import FilterConfig
 from mira.models import ReviewComment, Severity
+from mira.observability import event
+
+
+def record_rejection(comment: ReviewComment, stage: str, reason: str) -> dict:
+    """Log the decision without including source, suggestions, or model reasoning."""
+    entry = {
+        "stage": stage,
+        "path": comment.path,
+        "line": comment.line,
+        "title": comment.title,
+        "severity": comment.severity.name,
+        "category": comment.category,
+        "confidence": comment.confidence,
+        "source_pass": comment.source_pass,
+        "reason": reason,
+    }
+    event("review.finding_rejected", "Candidate finding rejected", **entry)
+    return entry
 
 
 def _jaccard_similarity(a: str, b: str) -> float:
@@ -96,6 +114,7 @@ def filter_noise(
     comments: list[ReviewComment],
     config: FilterConfig,
     review_round: int = 1,
+    audit: list[dict] | None = None,
 ) -> list[ReviewComment]:
     """Apply the full noise filtering pipeline.
 
@@ -131,15 +150,33 @@ def filter_noise(
     def _floor(c: ReviewComment) -> float:
         return max(confidence_floor, category_floors.get(c.category, 0.0))
 
-    result = [c for c in comments if c.confidence >= _floor(c)]
-    result = [c for c in result if c.severity >= min_severity]
+    def rejected(c: ReviewComment, reason: str) -> None:
+        entry = record_rejection(c, "noise_filter", reason)
+        if audit is not None:
+            audit.append(entry)
+
+    result = []
+    for c in comments:
+        if not c.confidence >= _floor(c):
+            rejected(c, f"confidence_below_threshold: {c.confidence} < {_floor(c)}")
+        elif c.severity < min_severity:
+            rejected(c, f"severity_below_minimum: {c.severity.name} < {min_severity.name}")
+        else:
+            result.append(c)
     result.sort(key=lambda c: (c.severity, c.confidence), reverse=True)
-    result = _deduplicate(result)
+    deduplicated = _deduplicate(result)
+    kept = {id(c) for c in deduplicated}
+    for c in result:
+        if id(c) not in kept:
+            rejected(c, "duplicate_of_higher_ranked_finding")
+    result = deduplicated
 
     # Split: blockers + warnings always post; suggestions + nitpicks share
     # the cap so they can't drown out real findings.
     urgent = [c for c in result if c.severity >= Severity.WARNING]
     low_priority = [c for c in result if c.severity < Severity.WARNING]
+    for c in low_priority[config.max_comments :]:
+        rejected(c, "low_priority_comment_cap")
     return urgent + low_priority[: config.max_comments]
 
 

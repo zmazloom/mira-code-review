@@ -99,6 +99,8 @@ class Session:
     storage_failed: bool = False
     secrets: set[str] = field(default_factory=set)
     terminal: bool = False
+    partial: bool = False
+    limitations: list[str] = field(default_factory=list)
 
     def write(self, stream: str, event: dict) -> None:
         with self.lock:
@@ -225,6 +227,33 @@ def event(
             )
 
 
+def _complete_review(session: Session, started: float) -> None:
+    event(
+        "review.completed",
+        "Review completed with partial coverage" if session.partial else "Review completed",
+        user_message="Code review completed with partial coverage. See review limitations."
+        if session.partial
+        else "Code review completed.",
+        level="WARNING" if session.partial else "INFO",
+        partial=session.partial,
+        limitations=session.limitations,
+        duration_ms=(time.monotonic() - started) * 1000,
+    )
+
+
+def record_review_result(result: Any) -> None:
+    """Carry result coverage through nested entry points to the terminal event."""
+    session = _context.get()
+    result = getattr(result, "result", result)
+    report = getattr(result, "task_review", None)
+    if session is not None and isinstance(report, dict):
+        limitations = report.get("limitations") or []
+        session.partial = session.partial or bool(
+            limitations or report.get("unverified_requirements")
+        )
+        session.limitations = list(dict.fromkeys([*session.limitations, *limitations]))
+
+
 @contextmanager
 def review_execution(mode: str = "standard", review_id: str | None = None):
     """Nested entry points share one execution, including task publishing."""
@@ -252,12 +281,7 @@ def review_execution(mode: str = "standard", review_id: str | None = None):
         cancelled = isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt))
         # CLI exit 1 means findings with blockers, not a failed execution.
         if isinstance(exc, SystemExit) and exc.code in (None, 0, 1):
-            event(
-                "review.completed",
-                "Review completed",
-                user_message="Code review completed.",
-                duration_ms=(time.monotonic() - started) * 1000,
-            )
+            _complete_review(session, started)
         else:
             event(
                 "review.cancelled" if cancelled else "review.failed",
@@ -272,12 +296,7 @@ def review_execution(mode: str = "standard", review_id: str | None = None):
         raise
     else:
         if not session.terminal:
-            event(
-                "review.completed",
-                "Review completed",
-                user_message="Code review completed.",
-                duration_ms=(time.monotonic() - started) * 1000,
-            )
+            _complete_review(session, started)
     finally:
         session.closed = True
         _operation.reset(op_token)
@@ -371,6 +390,7 @@ def traced(name: str, user_message: str | None = None, *, review: bool = False):
                     result = await fn(*args, **kwargs)
                     if hasattr(result, "review_id"):
                         result.review_id = current_review_id() or ""
+                    record_review_result(result)
                     return result
 
             return async_wrapper
@@ -390,6 +410,21 @@ def retry_started(state) -> None:
     _attempt.set(state.attempt_number)
     if state.attempt_number > 1:
         event("request.retry", "Retrying external operation", retry_attempt=state.attempt_number)
+
+
+def retry_scheduled(state) -> None:
+    """Record the actual retry cause without logging prompts or response bodies."""
+    exc = state.outcome.exception() if state.outcome else None
+    event(
+        "request.retry_scheduled",
+        "External operation will be retried",
+        retry_attempt=state.attempt_number,
+        next_attempt=state.attempt_number + 1,
+        delay_seconds=state.next_action.sleep if state.next_action else 0,
+        error_type=type(exc).__name__ if exc else None,
+        error_message=str(exc) if exc else None,
+        error_code=exc.code if hasattr(exc, "code") else None,
+    )
 
 
 def trace_github_requester(requester) -> None:

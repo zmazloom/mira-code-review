@@ -27,6 +27,13 @@ from mira.models import ReviewResult, Severity
 from mira.observability import traced
 
 
+def _task_review_limitations(result: ReviewResult) -> list[str]:
+    """Return user-visible task-review coverage limitations."""
+    task_review = result.task_review or {}
+    limitations = task_review.get("limitations") or []
+    return [str(item) for item in limitations if str(item).strip()]
+
+
 def _format_text(result: ReviewResult) -> str:
     """Format review result as human-readable text."""
     fa = is_persian(result.output_language)
@@ -60,8 +67,22 @@ def _format_text(result: ReviewResult) -> str:
         lines.append(result.summary)
         lines.append("")
 
+    limitations = _task_review_limitations(result)
+    if limitations:
+        lines.append("محدودیت‌های بررسی:" if fa else "Review limitations:")
+        lines.extend(f"- {item}" for item in limitations)
+        lines.append("")
+
     if not result.comments:
-        lines.append("مشکلی یافت نشد." if fa else "No issues found.")
+        lines.append(
+            (
+                "یافته‌ای تولید نشد. پوشش بررسی ناقص بود؛ محدودیت‌های بالا را ببینید."
+                if fa
+                else "No findings were produced. Review coverage was partial; see the limitations above."
+            )
+            if limitations
+            else ("مشکلی یافت نشد." if fa else "No issues found.")
+        )
         return "\n".join(lines)
 
     for i, c in enumerate(result.comments, 1):
@@ -120,6 +141,7 @@ def _format_json(result: ReviewResult) -> str:
             "sequence_diagram": result.walkthrough.sequence_diagram,
         }
 
+    limitations = _task_review_limitations(result)
     data = {
         "review_id": result.review_id,
         "summary": result.summary,
@@ -140,6 +162,8 @@ def _format_json(result: ReviewResult) -> str:
         ],
         "reviewed_files": result.reviewed_files,
         "token_usage": result.token_usage,
+        "partial": bool(limitations),
+        "limitations": limitations,
     }
     return json.dumps(data, indent=2)
 
@@ -149,6 +173,7 @@ def _format_manual_text(outcome: ManualReviewOutcome) -> str:
     info = outcome.pr_info
     result = outcome.result
     fa = is_persian(result.output_language)
+    limitations = _task_review_limitations(result)
     total_files = len(result.total_paths) if result.total_paths else result.reviewed_files
     if result.skipped_reason:
         status = (
@@ -166,6 +191,12 @@ def _format_manual_text(outcome: ManualReviewOutcome) -> str:
             )
     else:
         status = "تکمیل شد (منتشر نشد)" if fa else "Completed (not posted)"
+    if limitations:
+        status += (
+            f" — بررسی ناقص ({len(limitations)} محدودیت)"
+            if fa
+            else f" — partial review ({len(limitations)} limitation(s))"
+        )
 
     lines = [
         f"{'مخزن' if fa else 'Repository'}: {info.owner}/{info.repo}",
@@ -180,15 +211,32 @@ def _format_manual_text(outcome: ManualReviewOutcome) -> str:
         label("summary", result.output_language),
         "-------",
         result.summary or ("خلاصه‌ای تولید نشد." if fa else "No summary was generated."),
-        "",
-        f"{label('findings', result.output_language)}:",
     ]
+
+    if limitations:
+        lines.extend(
+            [
+                "",
+                "محدودیت‌های بررسی:" if fa else "Review limitations:",
+                *(f"- {item}" for item in limitations),
+            ]
+        )
+
+    lines.extend(["", f"{label('findings', result.output_language)}:"])
 
     if not result.comments:
         lines.append(
-            "یافته‌ای وجود ندارد. بررسی با موفقیت تکمیل شد."
-            if fa
-            else "No findings. The review completed successfully."
+            (
+                "یافته‌ای تولید نشد. پوشش بررسی ناقص بود؛ محدودیت‌های بالا را ببینید."
+                if fa
+                else "No findings were produced. Review coverage was partial; see the limitations above."
+            )
+            if limitations
+            else (
+                "یافته‌ای وجود ندارد. بررسی با موفقیت تکمیل شد."
+                if fa
+                else "No findings. The review completed successfully."
+            )
         )
     else:
         for comment in result.comments:

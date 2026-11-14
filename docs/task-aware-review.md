@@ -29,8 +29,8 @@ Cookie: mira_session=...
     "depth": "balanced",
     "post_comments": false,
     "include_existing_code": true,
-    "max_context_tokens": 30000,
-    "max_total_tokens": 300000,
+    "max_context_tokens": 120000,
+    "max_total_tokens": 2000000,
     "max_tool_calls": 24,
     "max_seconds": 900
   }
@@ -124,7 +124,8 @@ Commit metadata is bounded to 100 entries; existing per-file history retrieval
 retains its five-entry limit.
 
 1. Retrieve changed source first and extract at most 20 task-grounded
-   requirements in one grouped model call.
+   requirements with a structured submission tool when supported. Validate the
+   result and allow one repair for invalid requirement JSON or schema values.
 2. Reuse language import resolution and index dependency edges as navigation
    hints. Re-fetch evidence at head rather than trust stale index summaries.
 3. Search contents for task terms and changed symbols, including callers in
@@ -147,7 +148,21 @@ preventing reuse across tasks, users, repositories, commits, and models.
 
 The request also caps tool calls; its default is 24 even for deep reviews.
 Standard agentic passes retain their existing six-hop ceiling and share the
-same task-wide tool allowance. No configured standard checks are disabled.
+same task-wide tool allowance. When investigation ends without a submission,
+force the terminal tool with the collected tool results and conversation,
+instead of restarting from the original prompt. No configured standard checks
+are disabled. An output-limit failure stops the affected pass immediately;
+it does not trigger a second expensive forced submission of the same workload.
+
+Review complexity is bounded separately from the model context window:
+`review.max_chunk_tokens` defaults to 16,000 (including the chunker's 2,000-token
+overhead reservation), and `review.max_files_per_chunk` defaults to 8. Task-aware
+chunks receive excerpts for their own changed files and up to eight related
+source peers, bounded by `review.context_token_budget`, rather than repeating
+all changed-source excerpts in every chunk. Requirements and configured review
+documents remain available. `review.max_chunks_per_review` caps the chunk count;
+omitted files are listed as skipped, never silently marked reviewed. The
+`review.chunk_plan` event reports the actual partition and omitted paths.
 
 `max_context_tokens` is a per-call admission limit, capped by model configuration.
 Excerpts reserve room for rules, diff, and output. `max_total_tokens` separately
@@ -156,13 +171,44 @@ calls and clients. Existing provider token counters may be heuristic;
 provider retries/fallbacks mean this is not a precise billing cap. Actual
 provider-reported usage is returned separately. Time limits cancel pending work.
 
+The final `min(300, max_seconds / 3)` seconds are reserved for task verification.
+For the default 900-second job, earlier model passes stop at 600 seconds and
+verification can use the remaining 300 seconds. Expired phases are rejected
+before another model request starts. Token reserves and time reserves are
+independent; increasing a request timeout does not extend the job deadline.
+
 Up to one third of the total allowance (capped at three context windows) is
 protected for final task verification. Earlier passes report partial coverage
 when they reach their share, preserving already-produced findings.
 Optional final investigation also preserves one complete context window for a
 forced structured submission. That submission rebuilds bounded source excerpts
-from the shared cache, including newly read files, instead of replaying the
-growing tool conversation.
+from the shared cache when no valid investigation conversation is available;
+otherwise it retains the conversation and newly read evidence.
+
+The company Messages adapter records response `stop_reason`, content-block
+types, and input/output usage without recording prompt text, model reasoning,
+or raw response bodies. A missing tool submission gets one explicit repair;
+truncated responses fail immediately rather than using the network retry
+allowance. Network retries record their exception type, reason, and delay.
+For this endpoint, text and forced-tool submissions explicitly request
+`thinking: {type: disabled}`. Investigation also defaults to thinking disabled;
+an explicit reasoning effort enables a budget of 1,024/2,048/4,096 for
+low/medium/high, capped at half the output allowance. Signed thinking blocks
+from investigative tool turns are replayed verbatim, not logged. These controls
+require the internal gateway to honor the Anthropic-compatible thinking fields;
+the model's context window is not an output-thinking budget. The configured
+output limit is unchanged, and output exhaustion remains an explicit limitation.
+
+Rejected candidates emit `review.finding_rejected` with their path, line,
+source pass, pipeline stage, and reason (confidence/severity floor, duplicate,
+comment cap, critique, invalid task evidence, or invalid diff anchor). Source
+bodies, suggestions, and model reasoning are not included. Rejections during
+filtering and critique are also retained in the result audit.
+Completed passes retain their findings if another pass fails. The final
+`review.completed` event includes `partial` and `limitations`, and partial
+coverage produces a warning in both the admin and user logs.
+Empty partial reviews use an incomplete-review summary, not "No issues found,"
+including when partial verification is established only by the final assessment.
 Resource limits and failed passes produce explicit partial verification.
 
 ## Publishing, persistence, and compatibility

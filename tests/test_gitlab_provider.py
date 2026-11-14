@@ -359,6 +359,57 @@ class TestGetRepoTree:
             paths = await GitLabProvider("tok").get_repo_tree(_PR, "main")
         assert paths == ["a.py", "pkg/b.py"]
 
+    @pytest.mark.asyncio
+    async def test_normalizes_malformed_next_link_to_api_origin(self):
+        provider = GitLabProvider("tok")
+        provider._api = "https://gitlab.example/api/v4"
+        requested: list[str] = []
+
+        def handler(method, url, **kw):
+            requested.append(url)
+            if "page_token=" not in url:
+                return _FakeResp(
+                    json_data=[{"type": "blob", "path": "a.py"}],
+                    headers={
+                        "link": (
+                            '<https://gitlab.example:80/api/v4/projects/1/repository/tree'
+                            '?page_token=next&per_page=100>; rel="next"'
+                        )
+                    },
+                )
+            assert url.startswith("https://gitlab.example/api/v4/")
+            assert "gitlab.example:80" not in url
+            return _FakeResp(json_data=[{"type": "blob", "path": "b.py"}])
+
+        with _patch(handler):
+            paths = await provider.get_repo_tree(_PR, "main")
+
+        assert paths == ["a.py", "b.py"]
+        assert len(requested) == 2
+
+    @pytest.mark.asyncio
+    async def test_preserves_first_tree_page_when_later_page_fails(self):
+        calls = 0
+
+        def handler(method, url, **kw):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return _FakeResp(
+                    json_data=[
+                        {"type": "blob", "path": "a.py"},
+                        {"type": "tree", "path": "pkg"},
+                    ],
+                    headers={"link": '<https://gitlab.example/tree?page=2>; rel="next"'},
+                )
+            raise RuntimeError("next page unavailable")
+
+        with _patch(handler):
+            paths = await GitLabProvider("tok").get_repo_tree(_PR, "main")
+
+        assert paths == ["a.py"]
+        assert calls == 2
+
 
 class TestGetFileHistory:
     @pytest.mark.asyncio

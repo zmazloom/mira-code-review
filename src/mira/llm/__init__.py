@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mira.config import LLMConfig
+from mira.config import LLMConfig, is_company_messages_url
 from mira.llm.base import LLMProviderProtocol
 
 
@@ -18,6 +18,11 @@ def create_llm(config: LLMConfig) -> LLMProviderProtocol:
         from mira.llm.bedrock import BedrockProvider
 
         return BedrockProvider(config)
+
+    if is_company_messages_url(config.base_url):
+        from mira.llm.company_messages import CompanyMessagesProvider
+
+        return CompanyMessagesProvider(config)
 
     if config.api_style == "responses":
         from mira.llm.responses import ResponsesProvider

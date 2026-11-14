@@ -59,6 +59,10 @@ class NonRetriableLLMError(LLMError):
     """LLM client error (4xx) that should not be retried."""
 
 
+class OutputLimitLLMError(NonRetriableLLMError):
+    """Generation exhausted output capacity; do not repeat the same workload."""
+
+
 class ResponseParseError(MiraError):
     """Error parsing or validating LLM response."""
 

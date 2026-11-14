@@ -93,6 +93,16 @@ class TestFormatText:
         text = _format_text(result)
         assert "Tokens used:" not in text
 
+    def test_task_review_limitations_are_visible(self):
+        result = _make_result(
+            task_review={"limitations": ["Repository coverage is partial."]}
+        )
+        text = _format_text(result)
+        assert "Review limitations:" in text
+        assert "Repository coverage is partial." in text
+        assert "Review coverage was partial" in text
+        assert "No issues found." not in text
+
 
 # ---------------------------------------------------------------------------
 # _format_json tests
@@ -108,6 +118,14 @@ class TestFormatJson:
         assert data["walkthrough"] is None
         assert data["comments"] == []
         assert data["reviewed_files"] == 1
+        assert data["partial"] is False
+        assert data["limitations"] == []
+
+    def test_task_review_limitations_mark_json_partial(self):
+        result = _make_result(task_review={"limitations": ["Tree unavailable."]})
+        data = json.loads(_format_json(result))
+        assert data["partial"] is True
+        assert data["limitations"] == ["Tree unavailable."]
 
     def test_json_with_comments(self):
         comment = _make_comment(end_line=12)

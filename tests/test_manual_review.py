@@ -218,6 +218,19 @@ class TestManualReviewCLI:
         assert command_cls.call_args.kwargs["post"] is False
         assert "Completed (not posted)" in result.output
 
+    def test_task_review_limitations_are_reported_as_partial(self) -> None:
+        outcome = _outcome()
+        outcome.result.task_review = {
+            "limitations": ["Source repository tree unavailable."]
+        }
+
+        result, _ = _invoke_with_fake_command([], outcome)
+
+        assert result.exit_code == 0
+        assert "partial review" in result.output
+        assert "Source repository tree unavailable." in result.output
+        assert "review completed successfully" not in result.output
+
     def test_dry_run_performs_no_remote_writes(self) -> None:
         result, command_cls = _invoke_with_fake_command(["--dry-run"], _outcome())
         assert result.exit_code == 0

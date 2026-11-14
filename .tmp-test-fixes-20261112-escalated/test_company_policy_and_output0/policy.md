@@ -1,0 +1,1 @@
+Always use the existing AssignmentStore abstraction.

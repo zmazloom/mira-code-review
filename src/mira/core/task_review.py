@@ -12,14 +12,14 @@ from dataclasses import asdict, replace
 from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from mira.analysis.severity import classify_severity
 from mira.core.company_rules import load_company_rules
 from mira.core.diff_parser import parse_diff
 from mira.core.file_filter import filter_files
 from mira.core.noise_filter import _is_duplicate, _jaccard_similarity, filter_noise
-from mira.core.passes import agentic_review_loop, self_critique
+from mira.core.passes import agentic_review_loop, regenerate_summary, self_critique
 from mira.core.task_budget import BudgetedLLM, ReviewBudget, TaskBudgetExceeded
 from mira.index.coding_conventions import (
     CONSISTENCY_INSTRUCTIONS,
@@ -37,7 +37,7 @@ from mira.llm.response_parser import LLMComment, loads_lenient
 from mira.llm.utils import strip_code_fences, strip_think_blocks
 from mira.localization import append_language_instruction
 from mira.models import FileChangeType, FileDiff, HunkInfo, ReviewComment, ReviewResult, Severity
-from mira.observability import traced
+from mira.observability import event, traced
 from mira.providers.formatting import format_comment_body
 
 
@@ -45,8 +45,14 @@ class TaskReviewOptions(BaseModel):
     depth: Literal["fast", "balanced", "deep"] = "balanced"
     post_comments: bool = False
     include_existing_code: bool = True
-    max_context_tokens: int = Field(default=30_000, ge=8_000, le=120_000)
-    max_total_tokens: int = Field(default=300_000, ge=8_000, le=2_000_000)
+    # A full correctness prompt includes the diff, retrieved source context,
+    # and agentic tool schemas.  Use the configured model window by default;
+    # ``configure`` still applies a lower model-specific cap when necessary.
+    max_context_tokens: int = Field(default=120_000, ge=8_000, le=120_000)
+    # Agentic follow-ups resend the growing conversation, so their cumulative
+    # admission estimate is materially larger than one context window.  Keep
+    # enough room for standard passes plus the verification reserve.
+    max_total_tokens: int = Field(default=2_000_000, ge=8_000, le=2_000_000)
     max_tool_calls: int = Field(default=24, ge=0, le=100)
     max_seconds: int = Field(default=900, ge=10, le=3600)
 
@@ -56,6 +62,15 @@ class Evidence(BaseModel):
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
     quote: str = Field(min_length=1, max_length=4000)
+
+
+class ExtractedRequirement(BaseModel):
+    description: str = Field(min_length=1, max_length=2000)
+
+
+class RequirementExtraction(BaseModel):
+    requirements: list[ExtractedRequirement] = Field(min_length=1, max_length=20)
+    search_terms: list[str] = Field(default_factory=list, max_length=20)
 
 
 class Requirement(BaseModel):
@@ -215,6 +230,9 @@ class TaskReviewSession:
 
     def configure(self, engine) -> None:
         self.budget.deadline = time.monotonic() + self.options.max_seconds
+        # Leave room for one slow final submission (the model call timeout is
+        # 300 seconds by default), without consuming most of shorter jobs.
+        self.budget.verification_seconds = min(300, self.options.max_seconds / 3)
         self.budget.context_tokens = min(
             self.options.max_context_tokens, engine.config.llm.max_context_tokens
         )
@@ -333,44 +351,82 @@ class TaskReviewSession:
         await asyncio.gather(*(self.fetch(p) for p in changed[: self.max_files]))
         self.progress("extracting_requirements")
         try:
-            raw = await engine.llm.complete(
-                [
-                    {
-                        "role": "system",
-                        "content": append_language_instruction(
-                            _TRUST
-                            + "Extract only explicit or architecturally necessary, verifiable requirements. "
-                            "Use task wording and the architecture evidence. CRUD may be split into operations; "
-                            "CRUD means create, read, update and delete, including when written as کراد. "
-                            "Cover the ENTIRE task even if the diff implements only a small part. "
-                            "Do not infer requirements from what the diff happens to contain. "
-                            "Consolidate duplicate requirements. Bulk submission and caching are separate capabilities. "
-                            "Do not mandate cache parameters, pagination, logging or particular new methods unless explicitly requested "
-                            "or required by demonstrated repository contracts. "
-                            "do not assume authorization roles, business rules, or mandatory tests without basis. "
-                            "Keep discovered code defects separate from task requirements: removing suspicious overloads, "
-                            "cleanup and optional improvements are findings, not user requirements unless explicitly requested. "
-                            'Return JSON {"requirements":[{"description":"..."}],"search_terms":["symbol"]}; maximum 20 requirements.',
-                            engine.config.review.prompt_output_language,
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "task": self.prompt,
-                                "title": pr_info.title,
-                                "changed_paths": changed,
-                                "source_samples": {
-                                    p: (s or "")[:1500] for p, s in list(self.sources.items())[:5]
-                                },
+            messages = [
+                {
+                    "role": "system",
+                    "content": append_language_instruction(
+                        _TRUST
+                        + "Extract only explicit or architecturally necessary, verifiable requirements. "
+                        "Use task wording and the architecture evidence. CRUD may be split into operations; "
+                        "CRUD means create, read, update and delete, including when written as کراد. "
+                        "Cover the ENTIRE task even if the diff implements only a small part. "
+                        "Do not infer requirements from what the diff happens to contain. "
+                        "Consolidate duplicate requirements. Bulk submission and caching are separate capabilities. "
+                        "Do not mandate cache parameters, pagination, logging or particular new methods unless explicitly requested "
+                        "or required by demonstrated repository contracts. "
+                        "do not assume authorization roles, business rules, or mandatory tests without basis. "
+                        "Keep discovered code defects separate from task requirements: removing suspicious overloads, "
+                        "cleanup and optional improvements are findings, not user requirements unless explicitly requested. "
+                        'Return JSON {"requirements":[{"description":"..."}],"search_terms":["symbol"]}; maximum 20 requirements.',
+                        engine.config.review.prompt_output_language,
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "task": self.prompt,
+                            "title": pr_info.title,
+                            "changed_paths": changed,
+                            "source_samples": {
+                                p: (s or "")[:1500] for p, s in list(self.sources.items())[:5]
                             },
-                            ensure_ascii=False,
-                        ),
-                    },
-                ]
-            )
-            extracted = _object(raw)
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+            extraction_tool = {
+                "type": "function",
+                "function": {
+                    "name": "submit_requirements",
+                    "description": "Submit explicit task requirements and source search terms.",
+                    "parameters": RequirementExtraction.model_json_schema(),
+                },
+            }
+            for attempt in range(2):
+                raw = (
+                    await engine.llm.complete_with_tools(messages, tools=[extraction_tool])
+                    if engine.llm.supports_tool_calling
+                    else await engine.llm.complete(messages, max_tokens=4096)
+                )
+                try:
+                    extracted = RequirementExtraction.model_validate(_object(raw)).model_dump()
+                    break
+                except (ValueError, TypeError) as exc:
+                    event(
+                        "task.requirement_extraction_invalid",
+                        "Requirement response failed validation",
+                        level="WARNING",
+                        error_type=type(exc).__name__,
+                        attempt=attempt + 1,
+                        validation_errors=[
+                            {"location": error["loc"], "type": error["type"]}
+                            for error in exc.errors(include_input=False, include_url=False)
+                        ]
+                        if isinstance(exc, ValidationError)
+                        else [],
+                    )
+                    if attempt:
+                        raise
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": "Return a valid requirements object with 1-20 nonempty "
+                            "description strings and search_terms. Submit using the provided "
+                            "tool when available. Do not include commentary.",
+                        }
+                    )
             self.requirements = [
                 Requirement(id=f"R{i + 1}", description=str(r["description"])[:2000])
                 for i, r in enumerate(extracted.get("requirements", [])[:20])
@@ -380,8 +436,14 @@ class TaskReviewSession:
                 raise ValueError("No requirements extracted")
         except TaskBudgetExceeded:
             extracted = {}
-        except Exception:
+        except Exception as exc:
             extracted = {}
+            event(
+                "task.requirement_extraction_failed",
+                "Task requirement extraction failed",
+                level="WARNING",
+                error_type=type(exc).__name__,
+            )
             self.note("Task requirement extraction failed; requirements remain unverified.")
         if not self.requirements:
             self.requirements = [Requirement(id="R1", description=self.prompt)]
@@ -457,8 +519,29 @@ class TaskReviewSession:
         )
         self.progress("reviewing")
 
-    def _context(self, llm, paths: list[str], *, conventions: bool = False) -> str:
+    def review_context(self, llm, paths: list[str], *, max_tokens: int) -> str:
+        """Focus a standard chunk on its files and a few related source peers."""
+        peers = [p for p in self.context_paths if p not in self.changed_paths][:8]
+        context = self._context(llm, paths + peers, max_tokens=max_tokens, note_omissions=False)
+        context += "\nTask verification requirements (untrusted task data):\n" + json.dumps(
+            [r.model_dump() for r in self.requirements], ensure_ascii=False
+        )
+        if self.review_documents:
+            context += "\n\n" + self.review_documents
+        return context
+
+    def _context(
+        self,
+        llm,
+        paths: list[str],
+        *,
+        conventions: bool = False,
+        max_tokens: int | None = None,
+        note_omissions: bool = True,
+    ) -> str:
         cap = max(500, (self.budget.context_tokens - self.budget.output_tokens) // 3)
+        if max_tokens is not None:
+            cap = min(cap, max_tokens)
         parts = ["Source repository excerpts at pinned head " + self.pr_info.head_sha]
         if conventions and self.coding_conventions:
             profile = self.coding_conventions.render(
@@ -481,9 +564,10 @@ class TaskReviewSession:
                 selected = set(range(len(lines)))
             excerpt = f"\n{path}\n" + "\n".join(f"{i + 1}: {lines[i]}" for i in sorted(selected))
             if llm.count_tokens("\n".join(parts) + excerpt) > cap:
-                self.note(
-                    "Selected source context exceeded its budget; some excerpts were omitted."
-                )
+                if note_omissions:
+                    self.note(
+                        "Selected source context exceeded its budget; some excerpts were omitted."
+                    )
                 continue
             parts.append(excerpt)
             self.shown_paths.add(path)
@@ -628,12 +712,26 @@ class TaskReviewSession:
                 by_id[candidate.id] = candidate
             self.requirements = list(by_id.values())
             comments = []
+
+            def reject_finding(item: object, reason: str) -> None:
+                item = item if isinstance(item, dict) else {}
+                event(
+                    "review.finding_rejected",
+                    "Task finding rejected",
+                    stage="task_validation",
+                    source_pass="task",
+                    reason=reason,
+                    path=item.get("path"),
+                    line=item.get("line"),
+                )
+
             for item in data.get("findings", []):
                 try:
                     finding = TaskFinding.model_validate(item)
                 except ValueError:
                     # One malformed optional comparison must not discard valid
                     # functional/security findings in the shared assessment.
+                    reject_finding(item, "invalid_finding_schema")
                     continue
                 consistency = finding.category.casefold() == "codebase_consistency"
                 if consistency:
@@ -661,19 +759,23 @@ class TaskReviewSession:
                             for e in finding.evidence
                         )
                     ):
+                        reject_finding(item, "unsupported_codebase_convention")
                         continue
                 if (
                     not finding.impact
                     or not finding.evidence
                     or not all(self.valid_evidence(e) for e in finding.evidence)
                 ):
+                    reject_finding(item, "missing_impact_or_invalid_source_evidence")
                     continue
                 if not any(
                     e.path == finding.path and e.start_line <= finding.line <= e.end_line
                     for e in finding.evidence
                 ):
+                    reject_finding(item, "finding_line_not_supported_by_evidence")
                     continue
                 if finding.requirement_id and finding.requirement_id not in by_id:
+                    reject_finding(item, "unknown_requirement_id")
                     continue
                 added_source = "\n".join(
                     line[1:]
@@ -722,10 +824,11 @@ class TaskReviewSession:
                 if consistency and any(
                     _is_duplicate(comment, c) for c in result.comments + result.repository_comments
                 ):
+                    reject_finding(item, "duplicate_convention_finding")
                     continue
                 comments.append(comment)
                 self.finding_details.append(finding.model_dump())
-            comments = filter_noise(comments, engine.config.filter)
+            comments = filter_noise(comments, engine.config.filter, audit=result.audit)
             if comments and engine.config.review.self_critique:
                 evidence_files = [
                     FileDiff(
@@ -743,12 +846,15 @@ class TaskReviewSession:
                     indexing_llm=engine.indexing_llm,
                     diff_files=evidence_files,
                     output_language=engine.config.review.prompt_output_language,
+                    audit=result.audit,
                 )
             comments = [ensure_agent_prompt(comment) for comment in comments]
             from mira.core.engine import _diff_line_map, _drop_unanchorable_comments
 
             merged = filter_noise(
-                result.comments + result.repository_comments + comments, engine.config.filter
+                result.comments + result.repository_comments + comments,
+                engine.config.filter,
+                audit=result.audit,
             )
             inline, repository = _drop_unanchorable_comments(merged, _diff_line_map(diff))
             result.comments = inline
@@ -766,6 +872,22 @@ class TaskReviewSession:
         except Exception:
             self.note("Task assessment failed; remaining requirements are unverified.")
         result.task_review = self.report()
+        if (
+            engine.config.review.include_summary
+            and not result.comments
+            and not result.repository_comments
+            and (self.limitations or result.task_review["unverified_requirements"])
+        ):
+            result.summary = await regenerate_summary(
+                engine.llm,
+                [],
+                [],
+                "",
+                "",
+                "",
+                output_language=engine.config.review.output_language,
+                partial=True,
+            )
 
     def report(self) -> dict:
         return {

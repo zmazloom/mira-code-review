@@ -46,6 +46,15 @@ class TestChunkFiles:
         chunks = chunk_files([], max_tokens=10000)
         assert chunks == []
 
+    def test_file_count_limit_splits_many_small_changes_without_losing_files(self):
+        files = [_make_file(f"file{i}.py", 100) for i in range(39)]
+        chunks = chunk_files(files, max_tokens=16_000, max_files=8)
+        assert len(chunks) == 5
+        assert all(len(chunk.files) <= 8 for chunk in chunks)
+        assert sorted(f.path for chunk in chunks for f in chunk.files) == sorted(
+            f.path for f in files
+        )
+
     def test_token_estimate(self):
         f = _make_file("a.py", 400)
         est = _file_token_estimate(f)

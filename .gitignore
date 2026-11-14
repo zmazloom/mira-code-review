@@ -22,6 +22,7 @@ ENV/
 
 # Testing
 .pytest_cache/
+/.tmp-resilience-tests-*/
 .coverage
 .coverage.*
 coverage.xml
@@ -45,6 +46,10 @@ Thumbs.db
 # - data/indexes/ contains per-repo code indexes
 # Both are runtime state, never source.
 data/
+
+# Local review diagnostics (model requests, responses, curl captures, and reports)
+/.tmp-first-model-call/
+/.tmp-model-diagnose/
 
 # Demo / scratch output that ends up in the repo root from local runs
 report.txt

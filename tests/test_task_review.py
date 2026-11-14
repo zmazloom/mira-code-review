@@ -89,6 +89,11 @@ class FakeLLM:
         self.messages.append(messages)
         return '{"comments":[],"summary":"Review checked"}'
 
+    async def complete_with_tools(self, messages, tools, **kwargs):
+        if tools[0]["function"]["name"] == "submit_requirements":
+            return await self.complete(messages, **kwargs)
+        return json.dumps(self.assessment)
+
     async def walkthrough(self, messages, **kwargs):
         return '{"summary":"Changes"}'
 
@@ -1132,6 +1137,21 @@ def test_task_prompt_builders_keep_untrusted_metadata_in_user_messages():
     assert "Trusted policy" in messages[0]["content"]
 
 
+def test_default_task_budgets_accommodate_general_review_and_followups():
+    c = config()
+    c.llm.max_context_tokens = 120_000
+    engine = ReviewEngine(c, FakeLLM(), provider(), dry_run=True)
+    session = TaskReviewSession("Create assignments", TaskReviewOptions())
+
+    session.configure(engine)
+
+    assert session.options.max_context_tokens == 120_000
+    assert session.options.max_total_tokens == 2_000_000
+    assert session.budget.context_tokens == 120_000
+    assert session.budget.total_tokens == 2_000_000
+    assert session.budget.verification_reserve == 360_000
+
+
 @pytest.mark.asyncio
 async def test_task_verification_reservation_survives_standard_pass_exhaustion(storage):
     llm = FakeLLM(
@@ -1207,6 +1227,7 @@ async def test_final_submission_survives_agentic_budget_and_uses_new_evidence(st
     session = TaskReviewSession("Create assignments", TaskReviewOptions(max_total_tokens=20000))
     session.configure(engine)
     await session.prepare(engine, info(), DIFF)
+    llm.complete_with_tools.reset_mock()
     session.context_paths = ["service.py"]
     # Permit one investigative call, but preserve a full window for submission.
     llm.count_tokens = lambda text: 200
@@ -1216,7 +1237,10 @@ async def test_final_submission_survives_agentic_budget_and_uses_new_evidence(st
     await session.assess(engine, ReviewResult(), DIFF)
     assert llm.complete_agentic.await_count == 1
     llm.complete_with_tools.assert_awaited_once()
-    assert "print(result.id)" in llm.complete_with_tools.call_args.args[0][1]["content"]
+    assert any(
+        "print(result.id)" in message.get("content", "")
+        for message in llm.complete_with_tools.call_args.args[0]
+    )
     assert session.requirements[0].status == "incorrect"
     assert session.budget.reserved <= session.budget.total_tokens
     assert not any("Overall token" in item for item in session.limitations)

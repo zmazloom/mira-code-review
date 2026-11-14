@@ -23,6 +23,16 @@ logger = logging.getLogger(__name__)
 # 0.1.1 standardization on the .yaml extension.
 _DEFAULT_CONFIG_FILENAMES = (".mira.yaml", ".mira.yml")
 
+# This internal deployment exposes the Anthropic Messages protocol at the
+# endpoint itself rather than at an OpenAI-compatible ``/chat/completions``
+# path.  Keep the exception exact so other plain-http URLs remain rejected.
+COMPANY_MESSAGES_URL = "http://aifa-chatbot.dev.dotin.ir/v1/messages"
+
+
+def is_company_messages_url(url: str) -> bool:
+    """Return whether ``url`` is the dedicated company Messages endpoint."""
+    return url.rstrip("/") == COMPANY_MESSAGES_URL
+
 
 def _is_local_host(host: str) -> bool:
     """Loopback, private/link-local IP literals, and dotless hostnames
@@ -76,9 +86,9 @@ class LLMConfig(BaseModel):
     aws_profile: str | None = None
     # Retry and timeout configuration for LLM calls.
     # Defaults match the previous hardcoded values to preserve existing behavior.
-    max_retries: int = Field(default=3, ge=1)
-    request_timeout: int = Field(default=120, ge=1)
-    retry_min_wait: int = Field(default=2, ge=0)
+    max_retries: int = Field(default=5, ge=1)
+    request_timeout: int = Field(default=300, ge=1)
+    retry_min_wait: int = Field(default=5, ge=0)
     retry_max_wait: int = Field(default=30, ge=0)
 
     @field_validator("base_url")
@@ -87,7 +97,11 @@ class LLMConfig(BaseModel):
         parsed = urlparse(v)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise ValueError(f"llm.base_url must be an http(s) URL, got {v!r}")
-        if parsed.scheme == "http" and not _is_local_host(parsed.hostname):
+        if (
+            parsed.scheme == "http"
+            and not _is_local_host(parsed.hostname)
+            and not is_company_messages_url(v)
+        ):
             raise ValueError(
                 f"llm.base_url {v!r} uses plain http to a public host — use https "
                 "(http is allowed only for localhost, private IPs, and dotless "
@@ -182,6 +196,9 @@ class ReviewConfig(BaseModel):
     # into more chunks, only the top-priority N are reviewed; the rest are
     # listed as skipped.
     max_chunks_per_review: int = Field(default=5, ge=1, le=20)
+    # Bound review complexity independently of the model's context window.
+    max_chunk_tokens: int = Field(default=16_000, ge=3_000)
+    max_files_per_chunk: int = Field(default=8, ge=1, le=50)
     include_summary: bool = True
     focus_only_on_problems: bool = False
     walkthrough: bool = True

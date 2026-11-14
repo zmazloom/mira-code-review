@@ -41,6 +41,10 @@ LLM_ERROR_MESSAGES: dict[str, ErrorMessage] = {
         full="Model returned neither tool call nor content",
         safe="Model returned neither tool call nor content",
     ),
+    "invalid_response": ErrorMessage(
+        full="Invalid model response: {reason}",
+        safe="The model returned an incomplete or invalid response",
+    ),
     "no_tools": ErrorMessage(
         full="tools list must not be empty",
         safe="tools list must not be empty",

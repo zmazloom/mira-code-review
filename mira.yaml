@@ -1,10 +1,13 @@
 llm:
-  base_url: "https://aifa-chatbot.sandpod.ir/v1"
+  base_url: "http://aifa-chatbot.dev.dotin.ir/v1/messages"
   api_key_env: "COMPANY_LLM_API_KEY"
-  model: "assistance-model"
+  model: "developer-model"
+  max_tokens: 16000
   temperature: 0
 
 review:
+  max_chunk_tokens: 16000
+  max_files_per_chunk: 8
   rules_file: "./company-rules.md"
   output_language: "fa"
   focus_only_on_problems: false

@@ -111,6 +111,36 @@ async def test_nested_review_includes_publishing_once():
     assert any(e.get("operation") == "task.publish" for e in events)
 
 
+@pytest.mark.parametrize("exit_code", [None, 1])
+def test_partial_coverage_is_carried_to_terminal_event(exit_code):
+    @traced("review", review=True)
+    async def run():
+        return SimpleNamespace(task_review={"limitations": ["Verification time exhausted."]})
+
+    def execute():
+        with review_execution() as session:
+            asyncio.run(run())
+            if exit_code is not None:
+                raise SystemExit(exit_code)
+        return session
+
+    if exit_code is not None:
+        with pytest.raises(SystemExit):
+            execute()
+    else:
+        execute()
+    # Read the sole review directory after the outer CLI scope finishes.
+    from mira.observability import log_directory
+
+    identifier = next(log_directory().iterdir()).name
+    terminal = read_events(identifier, "admin")[-1]
+    assert terminal["event"] == "review.completed"
+    assert terminal["partial"] is True
+    assert terminal["limitations"] == ["Verification time exhausted."]
+    assert terminal["level"] == "WARNING"
+    assert "partial coverage" in read_events(identifier)[-1]["message"]
+
+
 async def test_request_failure_logged_and_propagated():
     client = SimpleNamespace(get=AsyncMock(side_effect=httpx.ReadTimeout("slow")), timeout=2)
     with pytest.raises(httpx.ReadTimeout), review_execution() as session:

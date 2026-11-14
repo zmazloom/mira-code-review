@@ -7,7 +7,9 @@ import json
 import time
 from dataclasses import dataclass, field
 
+from mira.exceptions import OutputLimitLLMError
 from mira.llm.tool_schemas import SUBMIT_REVIEW_TOOL, SUBMIT_WALKTHROUGH_TOOL
+from mira.observability import event
 
 
 class TaskBudgetExceeded(RuntimeError):
@@ -27,6 +29,19 @@ class ReviewBudget:
     closed: bool = False
     verification_reserve: int = 0
     verification_started: bool = False
+    verification_seconds: float = 0
+
+    def phase_deadline(self) -> float | None:
+        if self.deadline is None:
+            return None
+        return self.deadline - (0 if self.verification_started else self.verification_seconds)
+
+    def time_exhausted(self) -> None:
+        if not self.verification_started and self.verification_seconds:
+            self.stop(
+                "Standard review time allowance exhausted; remaining time reserved for task verification."
+            )
+        self.stop("Execution time budget exhausted; verification is partial.")
 
     def stop(self, reason: str) -> None:
         if reason not in self.limitations:
@@ -75,11 +90,18 @@ class BudgetedLLM:
         return (
             cost <= self.budget.context_tokens
             and self.budget.reserved + cost + self.budget.context_tokens <= self.budget.total_tokens
+            and (
+                self.budget.phase_deadline() is None
+                or self.budget.phase_deadline() - time.monotonic() > 30
+            )
         )
 
     async def _call(self, method, messages, **kwargs):
         if self.budget.closed:
             self.budget.stop("Review execution has ended.")
+        deadline = self.budget.phase_deadline()
+        if deadline is not None and deadline <= time.monotonic():
+            self.budget.time_exhausted()
         messages, cost = self._prepare(method, messages, kwargs)
         async with self.budget.lock:
             if cost > self.budget.context_tokens:
@@ -97,18 +119,23 @@ class BudgetedLLM:
         if task:
             self.budget.active_tasks.add(task)
         try:
-            remaining = (
-                None
-                if self.budget.deadline is None
-                else max(0, self.budget.deadline - time.monotonic())
-            )
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
             async with asyncio.timeout(remaining):
                 return await getattr(self.provider, method)(messages, **kwargs)
         except TimeoutError:
-            self.budget.stop("Execution time budget exhausted; verification is partial.")
+            self.budget.time_exhausted()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except TaskBudgetExceeded:
+            raise
+        except Exception as exc:
+            if isinstance(exc, OutputLimitLLMError):
+                limitation = (
+                    "Model output limit exhausted before final submission; "
+                    "the affected review pass could not produce findings."
+                )
+                if limitation not in self.budget.limitations:
+                    self.budget.limitations.append(limitation)
             if (
                 "A configured LLM pass failed; review coverage is partial."
                 not in self.budget.limitations
@@ -116,7 +143,16 @@ class BudgetedLLM:
                 self.budget.limitations.append(
                     "A configured LLM pass failed; review coverage is partial."
                 )
-            raise RuntimeError("Configured LLM call failed") from None
+            event(
+                "llm.pass_failed",
+                "Configured LLM pass failed",
+                level="ERROR",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            if isinstance(exc, OutputLimitLLMError):
+                raise
+            raise RuntimeError("Configured LLM call failed") from exc
         finally:
             if task:
                 self.budget.active_tasks.discard(task)

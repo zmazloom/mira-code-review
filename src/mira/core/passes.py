@@ -13,8 +13,10 @@ import logging
 from collections.abc import Callable
 
 from mira.config import load_config
+from mira.core.noise_filter import record_rejection
+from mira.core.task_budget import TaskBudgetExceeded
 from mira.dashboard.models_config import llm_config_for
-from mira.exceptions import ResponseParseError
+from mira.exceptions import OutputLimitLLMError, ResponseParseError
 from mira.llm.prompts.review import (
     build_dependency_review_prompt,
     build_security_review_prompt,
@@ -46,10 +48,9 @@ async def agentic_review_loop(
     """Run an agentic tool-use loop until the LLM submits a review.
 
     Hands the model `read_file` and `grep_repo` alongside the terminal
-    `submit_review` tool. Caps at 6 hops to bound token spend; returns the
-    JSON args of the final `submit_review` call (same shape `llm.review`
-    returns), or "" if the loop exited without one — caller falls back to
-    a forced single-tool call.
+    `submit_review` tool. After the investigative hop limit, force a final
+    submission using the same conversation and collected evidence. Returns
+    the terminal tool arguments (the same shape as ``llm.review``).
     """
     from mira.llm.agentic_tools import AGENTIC_TOOLS
 
@@ -75,16 +76,22 @@ async def agentic_review_loop(
 
     for hop in range(max_hops):
         if can_continue is not None and not can_continue(convo, tools):
-            return ""
+            break
         try:
             msg = await llm.complete_agentic(convo, tools=tools)
+        except (TaskBudgetExceeded, OutputLimitLLMError):
+            raise
         except Exception as exc:
             logger.warning("Agentic hop %d failed: %s", hop + 1, exc)
-            return ""
+            if hop == 0:
+                return ""
+            break
 
         if not isinstance(msg, dict):
             logger.debug("Agentic hop %d returned a non-object response", hop + 1)
-            return ""
+            if hop == 0:
+                return ""
+            break
 
         tool_calls = msg.get("tool_calls") or []
         content = msg.get("content") or ""
@@ -95,15 +102,18 @@ async def agentic_review_loop(
                 hop + 1,
                 len(content),
             )
-            return ""
+            if content:
+                convo.append({"role": "assistant", "content": content})
+            break
 
-        convo.append(
-            {
-                "role": "assistant",
-                "content": content,
-                "tool_calls": tool_calls,
-            }
-        )
+        assistant_message = {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": tool_calls,
+        }
+        if "_company_content" in msg:
+            assistant_message["_company_content"] = msg["_company_content"]
+        convo.append(assistant_message)
 
         for call in tool_calls:
             fn = call.get("function") or {}
@@ -126,8 +136,18 @@ async def agentic_review_loop(
                 }
             )
 
-    logger.debug("Agentic loop hit %d-hop cap without submit_review", max_hops)
-    return ""
+    logger.info("Agentic investigation ended; forcing final submission with collected evidence")
+    terminal = terminal_tool or SUBMIT_REVIEW_TOOL
+    convo.append(
+        {
+            "role": "user",
+            "content": "Investigation is finished. Submit the review now using "
+            f"{terminal['function']['name']}, using the evidence already collected. "
+            "Do not request more tools or invent missing evidence. "
+            "Mark unverifiable requirements as unverified.",
+        }
+    )
+    return await llm.complete_with_tools(convo, tools=[terminal])
 
 
 def _indexing_llm(fallback: LLMProvider) -> LLMProvider:
@@ -507,19 +527,9 @@ async def self_critique(
         v = verdict_by_idx.get(i)
         evidence = v.get("evidence", "keep=false") if v else "no-verdict"
         reason = str(v.get("reason", "no reason")) if v else "critic returned no verdict"
+        entry = record_rejection(c, "self_critique", f"{evidence}: {reason}")
         if audit is not None:
-            audit.append(
-                {
-                    "stage": "self_critique",
-                    "path": c.path,
-                    "line": c.line,
-                    "title": c.title,
-                    "severity": c.severity.name,
-                    "category": c.category,
-                    "confidence": c.confidence,
-                    "reason": f"{evidence}: {reason}",
-                }
-            )
+            audit.append(entry)
         logger.info(
             "Self-critique dropped [%d] %s:%d (%s) — %s", i, c.path, c.line, evidence, reason[:120]
         )
@@ -537,6 +547,7 @@ async def regenerate_summary(
     fallback: str,
     indexing_llm: LLMProvider | None = None,
     output_language: str | None = None,
+    partial: bool = False,
 ) -> str:
     """Rewrite the review summary from the final filed outputs.
 
@@ -549,6 +560,12 @@ async def regenerate_summary(
     provider; otherwise one is constructed from ``load_config()``.
     """
     if not comments and not key_issues:
+        if partial:
+            return (
+                "بررسی ناقص بود؛ نبود یافته به معنی نبود مشکل نیست. محدودیت‌های بررسی را ببینید."
+                if is_persian(output_language)
+                else "Review incomplete; no findings does not mean no issues. See review limitations."
+            )
         return "مشکلی یافت نشد." if is_persian(output_language) else "No issues found."
 
     filed_lines = []

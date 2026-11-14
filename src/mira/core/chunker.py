@@ -28,6 +28,7 @@ def chunk_files(
     files: list[FileDiff],
     max_tokens: int,
     provider: LLMProviderProtocol | None = None,
+    max_files: int | None = None,
 ) -> list[ReviewChunk]:
     """Split files into chunks that fit within token limits.
 
@@ -71,7 +72,9 @@ def chunk_files(
         # Find first chunk with room
         placed = False
         for chunk in chunks:
-            if chunk.token_estimate + est <= available:
+            if chunk.token_estimate + est <= available and (
+                max_files is None or len(chunk.files) < max_files
+            ):
                 chunk.files.append(file_diff)
                 chunk.token_estimate += est
                 placed = True

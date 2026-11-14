@@ -12,7 +12,7 @@ import asyncio
 import logging
 import re
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -120,17 +120,30 @@ class GitLabProvider(BaseProvider):
             raise ProviderError(f"GitLab {method} {url} → {resp.status_code}: {resp.text[:300]}")
         return resp
 
-    async def _paginate(self, url: str) -> list[dict[str, Any]]:
+    async def _paginate(
+        self, url: str, *, preserve_partial: bool = False
+    ) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         next_url: str | None = url + ("&" if "?" in url else "?") + "per_page=100"
         async with httpx.AsyncClient(timeout=30) as client:
             while next_url:
-                resp = await http_request(
-                    client, "get", "gitlab", next_url, headers={"PRIVATE-TOKEN": self._token}
-                )
-                resp.raise_for_status()
-                out.extend(resp.json())
-                next_url = _next_link(resp.headers.get("link", ""))
+                try:
+                    resp = await http_request(
+                        client, "get", "gitlab", next_url, headers={"PRIVATE-TOKEN": self._token}
+                    )
+                    resp.raise_for_status()
+                    out.extend(resp.json())
+                    next_link = _next_link(resp.headers.get("link", ""))
+                    next_url = _pagination_url(url, next_link) if next_link else None
+                except Exception as exc:
+                    if preserve_partial and out:
+                        logger.warning(
+                            "GitLab pagination stopped after %d item(s); preserving partial result: %s",
+                            len(out),
+                            exc,
+                        )
+                        break
+                    raise
         return out
 
     async def _self_username(self) -> str:
@@ -247,7 +260,7 @@ class GitLabProvider(BaseProvider):
             f"?recursive=true&pagination=keyset&ref={quote(ref, safe='')}"
         )
         try:
-            items = await self._paginate(url)
+            items = await self._paginate(url, preserve_partial=True)
         except Exception as exc:
             logger.debug("Failed to fetch repo tree: %s", exc)
             return []
@@ -544,3 +557,19 @@ def _next_link(link_header: str) -> str | None:
         if 'rel="next"' in part:
             return part.split(";")[0].strip().strip("<>")
     return None
+
+
+def _pagination_url(origin_url: str, next_link: str) -> str:
+    """Resolve a pagination link while keeping the authenticated API origin.
+
+    Reverse proxies sometimes emit an externally invalid port in an absolute
+    ``Link`` header (for example HTTPS on port 80).  The original request URL
+    is authoritative for scheme and authority; only the returned path/query
+    are pagination state.  Keeping the origin also avoids forwarding the
+    private token to an unexpected host.
+    """
+    origin = urlsplit(origin_url)
+    candidate = urlsplit(urljoin(origin_url, next_link))
+    return urlunsplit(
+        (origin.scheme, origin.netloc, candidate.path, candidate.query, candidate.fragment)
+    )

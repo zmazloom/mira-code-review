@@ -8,7 +8,7 @@ import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
-from mira.observability import traced
+from mira.observability import event, traced
 
 if TYPE_CHECKING:
     from mira.core.task_review import TaskReviewSession
@@ -22,7 +22,7 @@ from mira.core.context import expand_context
 from mira.core.diff_parser import parse_diff
 from mira.core.ensemble import merge_ensemble_runs
 from mira.core.file_filter import filter_files
-from mira.core.noise_filter import drop_already_posted, filter_noise
+from mira.core.noise_filter import drop_already_posted, filter_noise, record_rejection
 from mira.core.passes import (
     agentic_review_loop,
     dependency_review_pass,
@@ -74,16 +74,7 @@ logger = logging.getLogger(__name__)
 
 def _audit_drop(c: ReviewComment, stage: str, reason: str = "") -> dict:
     """Audit entry for a comment removed by a pipeline stage."""
-    return {
-        "stage": stage,
-        "path": c.path,
-        "line": c.line,
-        "title": c.title,
-        "severity": c.severity.name,
-        "category": c.category,
-        "confidence": c.confidence,
-        "reason": reason,
-    }
+    return record_rejection(c, stage, reason or stage)
 
 
 def _audit_stage(audit: list[dict], stage: str, before: list, after: list) -> None:
@@ -874,6 +865,7 @@ class ReviewEngine:
                 result.comments, _diff_line_map(full_diff_text)
             )
             if unanchorable:
+                _audit_stage(result.audit, "diff_anchor", unanchorable, [])
                 logger.info(
                     "Dropped %d comment(s) outside the PR diff: %s",
                     len(unanchorable),
@@ -1425,18 +1417,47 @@ class ReviewEngine:
 
         chunks = chunk_files(
             expanded,
-            max_tokens=(
+            max_tokens=min(
+                self.config.review.max_chunk_tokens,
                 max(
                     3000,
                     self.task_session.budget.context_tokens
-                    - self.llm.count_tokens(code_context_block)
+                    - min(
+                        self.llm.count_tokens(code_context_block),
+                        self.config.review.context_token_budget,
+                    )
                     - self.config.llm.max_tokens
                     - 2500,
                 )
                 if self.task_session is not None
-                else self.config.llm.max_context_tokens
+                else self.config.llm.max_context_tokens,
             ),
             provider=self.llm,
+            max_files=self.config.review.max_files_per_chunk,
+        )
+        if len(chunks) > self.config.review.max_chunks_per_review:
+            # FFD packs largest diffs first, not the highest-risk paths.
+            # Preserve the review priority policy when applying a chunk cap.
+            priority_order = {f.path: i for i, (f, _) in enumerate(rank_files(expanded))}
+            chunks.sort(key=lambda c: min(priority_order[f.path] for f in c.files))
+            omitted = chunks[self.config.review.max_chunks_per_review :]
+            chunks = chunks[: self.config.review.max_chunks_per_review]
+            omitted_paths = [f.path for chunk in omitted for f in chunk.files]
+            skipped_paths_only.extend(omitted_paths)
+            omitted_set = set(omitted_paths)
+            selected_paths = [p for p in selected_paths if p not in omitted_set]
+            filtered = [f for f in filtered if f.path not in omitted_set]
+            if self.task_session is not None:
+                self.task_session.note(
+                    "Review chunk limit reached; some changed files were skipped."
+                )
+        event(
+            "review.chunk_plan",
+            "Review workload partitioned",
+            chunks=len(chunks),
+            files_per_chunk=[len(c.files) for c in chunks],
+            diff_estimates=[c.token_estimate for c in chunks],
+            skipped_paths=skipped_paths_only,
         )
 
         learned_rules: list[str] = []
@@ -1504,13 +1525,22 @@ class ReviewEngine:
                     chunk_history = {
                         f.path: file_history[f.path] for f in chunk.files if f.path in file_history
                     }
+                    chunk_context = (
+                        self.task_session.review_context(
+                            self.llm,
+                            [f.path for f in chunk.files],
+                            max_tokens=self.config.review.context_token_budget,
+                        )
+                        if self.task_session is not None
+                        else code_context_block
+                    )
                     messages = build_review_prompt(
                         files=chunk.files,
                         config=self.config,
                         pr_title=pr_title,
                         pr_description=pr_description,
                         existing_comments=base_existing or None,
-                        code_context=code_context_block,
+                        code_context=chunk_context,
                         # Company rules run in focused policy passes below.
                         # Supplying them here as well creates duplicate findings.
                         company_rules=None,
@@ -1559,6 +1589,9 @@ class ReviewEngine:
                             messages,
                             executor,
                             output_language=self.config.review.prompt_output_language,
+                            can_continue=self.llm.can_investigate
+                            if self.task_session is not None
+                            else None,
                         )
                         audit.append({"stage": "agentic", "chunk": idx, "calls": executor.call_log})
                     if not raw_response:
@@ -1577,7 +1610,7 @@ class ReviewEngine:
                                 company_rules=policy_part,
                                 pr_title=pr_title,
                                 pr_description=pr_description,
-                                code_context=code_context_block,
+                                code_context=chunk_context,
                                 task_aware=self.task_session is not None,
                             )
                             company_raw = ""
@@ -1595,6 +1628,9 @@ class ReviewEngine:
                                     company_messages,
                                     company_executor,
                                     output_language=self.config.review.prompt_output_language,
+                                    can_continue=self.llm.can_investigate
+                                    if self.task_session is not None
+                                    else None,
                                 )
                                 audit.append(
                                     {
@@ -1676,12 +1712,10 @@ class ReviewEngine:
                             )
 
                     return comments, key_issues, summary_text
-                except TaskBudgetExceeded:
+                except TaskBudgetExceeded as exc:
                     if self.task_session is None:
                         raise
-                    self.task_session.note(
-                        "Some standard review passes stopped at their allowance; task verification retained its reserved budget."
-                    )
+                    self.task_session.note(f"A standard review pass stopped: {exc}")
                     if not policy_merged:
                         comments.extend(company_comments)
                         key_issues.extend(company_key_issues)
@@ -1697,7 +1731,21 @@ class ReviewEngine:
                         len(chunks),
                         exc,
                     )
-                    return [], [], ""
+                    if not policy_merged:
+                        comments.extend(company_comments)
+                        key_issues.extend(company_key_issues)
+                    return comments, key_issues, summary_text
+                except Exception as exc:
+                    if self.task_session is None:
+                        raise
+                    self.task_session.note(
+                        "A standard review pass failed; results from completed passes were retained."
+                    )
+                    logger.warning("Review chunk %d failed: %s", idx + 1, type(exc).__name__)
+                    if not policy_merged:
+                        comments.extend(company_comments)
+                        key_issues.extend(company_key_issues)
+                    return comments, key_issues, summary_text
 
         review_task = _asyncio.gather(*[_review_chunk(i, c) for i, c in enumerate(chunks)])
         security_task = _asyncio.create_task(
@@ -1796,8 +1844,8 @@ class ReviewEngine:
             all_comments,
             self.config.filter,
             review_round=review_round,
+            audit=audit,
         )
-        _audit_stage(audit, "noise_filter", all_comments, final_comments)
 
         # Dedupe against still-open threads before self-critique, so we don't
         # spend critique calls on comments we'd discard anyway.
@@ -1856,6 +1904,7 @@ class ReviewEngine:
                     fallback=original_summary,
                     indexing_llm=self.indexing_llm,
                     output_language=self.config.review.prompt_output_language,
+                    partial=bool(self.task_session and self.task_session.limitations),
                 )
             except Exception as exc:
                 logger.warning("Summary regeneration failed, using original: %s", exc)
